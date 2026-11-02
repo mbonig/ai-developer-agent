@@ -1,0 +1,448 @@
+# AI Developer Agent
+
+An autonomous coding agent that works GitHub issues from start to finish. You label an issue. The agent reads the repository, asks questions in the issue comments when it is blocked, writes the change, opens a pull request, and revises it as reviewers comment. It keeps going until the pull request is merged or closed.
+
+It runs on AWS and is built around one constraint: **the agent waits for humans for free.** People answer in minutes or in days. While the agent waits, nothing is running and nothing is billed for compute.
+
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [The life of an issue](#the-life-of-an-issue)
+- [How the agent does the work](#how-the-agent-does-the-work)
+- [Security model](#security-model)
+- [Cost and limits](#cost-and-limits)
+- [Repository layout](#repository-layout)
+- [Setup and deployment](#setup-and-deployment)
+- [Configuration](#configuration)
+- [Operating it](#operating-it)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+
+## How it works
+
+1. A GitHub App is installed on your repositories. It sends webhooks for issues, comments, pull requests and reviews.
+2. Applying the `agent` label to an issue starts a run. Only the label starts one, and applying a label already needs triage permission.
+3. A **durable orchestrator** (a Lambda durable function) owns the run. It launches short-lived **work segments**, one at a time, and waits for people in between.
+4. Each segment runs in a disposable **Lambda MicroVM**. It clones the repository, runs a Claude tool-use loop on Amazon Bedrock, commits and pushes, and reports back. Then the VM is terminated.
+5. Comments from authorized people (owners, members and collaborators) wake the orchestrator, which starts another segment with the new comments.
+6. The run ends when the pull request is merged (done) or closed.
+
+Nothing about the agent lives in a long-running process. Everything it knows is rebuilt for each segment from three places: the Git branch, a transcript in S3, and a DynamoDB record. A lost segment loses only the work of that one segment.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    GH[("GitHub<br/>App webhooks")]
+    subgraph Ingress
+        URL["Function URL"]
+        ING["ingress Lambda<br/>verify signature<br/>filter authors<br/>route events"]
+    end
+    subgraph State
+        DDB[("DynamoDB<br/>issue state, inbox,<br/>session costs")]
+        S3[("S3<br/>transcripts,<br/>factory state")]
+    end
+    subgraph Orchestration
+        ORCH["Orchestrator<br/>(Lambda durable function)<br/>one execution per issue"]
+        SWEEP["Sweeper Lambda<br/>every 15 min"]
+        TV["Token vendor Lambda<br/>GitHub App tokens"]
+    end
+    subgraph Sandbox["Work segment: disposable MicroVM (ARM64)"]
+        SRV["Segment server<br/>(root harness)"]
+        AGENT["Agent commands<br/>(unprivileged user)"]
+    end
+    BR["Amazon Bedrock<br/>Claude (Converse API)"]
+    SM["Secrets Manager"]
+
+    GH -->|webhook| URL --> ING
+    ING -->|"append comment,<br/>wake or start"| DDB
+    ING -->|"start / wake / cancel"| ORCH
+    ORCH <-->|"claim, park, costs"| DDB
+    ORCH -->|"RunMicrovm +<br/>POST /segment"| SRV
+    SRV -->|"callback<br/>(result)"| ORCH
+    SRV <--> S3
+    SRV -->|"model calls"| BR
+    SRV -->|"fetch token"| TV
+    TV --> SM
+    SRV -. runs .-> AGENT
+    SRV -->|"git push (branch)"| GH
+    ORCH -->|"comments, open PR,<br/>update PR cost"| GH
+    SWEEP -->|"terminate orphans"| Sandbox
+    ING -.-> SM
+```
+
+| Piece | What it does |
+|---|---|
+| **GitHub App** | Delivers webhooks for `issues`, `issue_comment`, `pull_request`, `pull_request_review` and `pull_request_review_comment`. Installed once, works for every repository it is installed on. |
+| **Ingress** | A public Function URL. Verifies the webhook signature, drops duplicates and bots, applies the author rules, and starts, wakes or cancels runs. |
+| **Orchestrator** | A Lambda durable function, one execution per issue. Sequences segments, waits for humans, retries, enforces budgets, posts comments, opens pull requests. |
+| **Work segment** | A Lambda MicroVM running the segment server. Does the actual coding work, then is terminated. |
+| **Token vendor** | The only component that can read the GitHub App private key. Mints installation tokens scoped to one repository. |
+| **Sweeper** | Terminates MicroVMs that outlived their segment or that no run refers to. |
+| **DynamoDB** | One table: per-issue record, comment inbox, pull request links, webhook de-duplication, per-session costs. |
+| **S3** | Agent transcripts (versioned, encrypted with a customer-managed KMS key) and saved factory state. |
+
+## The life of an issue
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor H as Human
+    participant GH as GitHub
+    participant IN as Ingress
+    participant OR as Orchestrator
+    participant VM as MicroVM segment
+    participant BR as Bedrock
+
+    H->>GH: Label issue "agent"
+    GH->>IN: issues.labeled webhook
+    IN->>OR: start execution (one per issue)
+    OR->>VM: launch VM, POST the job
+    VM->>GH: clone repository (scoped token)
+    loop tool-use loop
+        VM->>BR: Converse (tools, cached context)
+        BR-->>VM: read / edit / run commands
+    end
+    VM->>GH: push branch
+    VM-->>OR: result: questions
+    OR->>GH: post questions as an issue comment
+    Note over OR: waiting for a human<br/>no VM, no compute
+    H->>GH: comment with answers
+    GH->>IN: issue_comment webhook
+    IN->>OR: wake (exactly one waker wins)
+    Note over OR: debounce 60s so a burst<br/>of comments is one segment
+    OR->>VM: launch a new VM with the new comments
+    VM-->>OR: result: done (PR title and body)
+    OR->>GH: open pull request, update cost section
+    H->>GH: review comments
+    GH->>IN: webhooks
+    IN->>OR: wake
+    OR->>VM: new segment
+    VM-->>OR: result: revised (summary)
+    OR->>GH: reply on the PR, update cost section
+    H->>GH: merge
+    GH->>IN: pull_request.closed (merged)
+    IN->>OR: cancel
+    Note over OR: run ends as DONE
+```
+
+### Run states
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTING: issue labeled
+    STARTING --> RUNNING: segment launched
+    RUNNING --> WAITING: nothing unread, waiting for a human
+    WAITING --> RUNNING: authorized comment
+    WAITING --> EXPIRED: no reply for 7 days
+    EXPIRED --> STARTING: a later comment
+    RUNNING --> DONE: PR merged
+    RUNNING --> CLOSED: PR or issue closed
+    RUNNING --> FAILED: segment failed twice
+    RUNNING --> BUDGET_EXHAUSTED: token budget used
+    FAILED --> STARTING: relabel
+    CLOSED --> STARTING: relabel
+    DONE --> [*]
+    BUDGET_EXHAUSTED --> [*]
+```
+
+The states that matter:
+
+- **WAITING** costs nothing. The orchestrator is suspended and no VM exists.
+- **EXPIRED** is the same idea with a time limit: after seven days without a reply the run stops and posts a note. Any later comment resumes it from saved state.
+- **BUDGET_EXHAUSTED** is final. The agent posts a summary of where it got to, and opens a **draft** pull request if it pushed any commits.
+- **DONE, BUDGET_EXHAUSTED** do not accept new comments or relabeling.
+
+### No lost comments, no double wakes
+
+Comments can arrive while a segment is running, while the orchestrator is going to sleep, or in a burst of ten at once. Three rules make that safe:
+
+- Every accepted comment is appended to a per-issue **inbox** with a contiguous sequence number, in the same DynamoDB transaction that bumps the counter. A segment consumes an exact range, and only marks it consumed when it succeeds, so a retry sees the same comments.
+- The orchestrator only goes to sleep through a **conditional write that requires an empty inbox**. If a comment slipped in, the write fails and the next segment starts at once.
+- Waking is a conditional state transition. Only the webhook that wins it sends the wake signal, so two simultaneous comments produce one wake.
+
+These properties are tested against DynamoDB Local with concurrent writers.
+
+## How the agent does the work
+
+### Inside a segment
+
+```mermaid
+flowchart TD
+    A[Job arrives at the segment server] --> B[Check the metadata block is in place<br/>otherwise refuse to run]
+    B --> C[Get a repository-scoped GitHub token]
+    C --> D[Clone the repository]
+    D --> E{Detect the work mode}
+    E -->|factory| F1[Fetch the factory branch<br/>restore saved factory state]
+    E -->|openspec / plain| F2[Check out or create<br/>agent/issue-N]
+    F1 --> G
+    F2 --> G[Load transcript from S3<br/>compact it if it is large]
+    G --> H[Add new comments as one user turn]
+    H --> I{{Claude tool-use loop}}
+    I -->|tools| J["list_files, read_file, write_file,<br/>edit_file, grep, run_command,<br/>view_image, run_subagent"]
+    J --> I
+    I -->|ask_questions| K
+    I -->|finish| K
+    I -->|turn or token limit| K[Persist]
+    K --> L[Commit as the agent user]
+    L --> M["Publish: bundle the commits,<br/>push from a clean repository"]
+    M --> N[Save transcript and factory state to S3]
+    N --> O[Report the result with usage and cost]
+    O --> P[Orchestrator terminates the VM]
+```
+
+The loop has two **terminal tools**: `ask_questions` (post questions, then wait) and `finish` (open a pull request, or in review, post a summary). A segment also stops when it reaches its turn or token limit, and then reports what it got done.
+
+Details that keep it cheap and robust:
+
+- **Prompt caching.** Cache points sit after the system prompt, after the tool definitions, and at the end of the conversation, so each turn re-reads earlier turns at about a tenth of the normal price.
+- **Compaction.** When a saved transcript grows past a threshold, the next segment replaces it with a model-written summary, the open questions and answers, and the current diff.
+- **Parallel tools.** All tool calls in one response run, and their results return together.
+- **The agent can look at images.** `view_image` lets it check screenshots it rendered. A headless Chromium and fonts are in the image.
+- **Reviewer subagents.** `run_subagent` runs an independent, read-only reviewer session with a clean context (used by the factory mode).
+
+### Work modes
+
+The harness inspects each repository at the start of every segment and picks how the agent should work, in priority order:
+
+```mermaid
+flowchart TD
+    S[Repository cloned] --> F{"factory/ with swamp config<br/>and swamp token configured?"}
+    F -->|yes| FM["<b>Factory mode</b><br/>swamp software factory"]
+    F -->|no| O{"openspec/config.yaml?"}
+    O -->|yes| OM["<b>OpenSpec mode</b><br/>proposal first, then confirm"]
+    O -->|no| PM["<b>Plain mode</b><br/>implement directly"]
+```
+
+**Plain mode.** The agent implements the issue, runs the project's tests, and opens a pull request.
+
+**OpenSpec mode.** The agent follows the repository's own `openspec-propose` skill with the `openspec` CLI and writes **no application code** at first. It opens a pull request titled "Proposal: ..." that contains only the spec and asks for confirmation. Your reply decides what happens next:
+
+```mermaid
+flowchart LR
+    P["PR contains only the spec"] --> R{Human reply}
+    R -->|"approved / go ahead"| I["Implement the tasks<br/>(openspec-apply-change),<br/>run tests, check off tasks"]
+    R -->|"change the plan"| U["Revise the spec only,<br/>ask again"]
+    R -->|"feedback on the code"| C["Revise the code"]
+    R -->|unclear| Q["Ask a question<br/>never implements without<br/>clear approval"]
+```
+
+**Factory mode.** If the repository contains a swamp software factory (`factory/`, built on `@swamp/stagecraft`), the agent drives it: plan, adversarial plan review, a human **plan-approval** gate, implement, verify, three code reviewers (performance, security, architecture), then an attested pull request. The agent works around the pieces that need credentials it deliberately does not have:
+
+- It starts each work item under the key `gh-<issue>`, so keys cannot collide across issues.
+- The factory's branch `factory/gh-<issue>` is committed and published by the harness, not by the agent.
+- The factory's saved state moves through S3 between segments, which is how the approval gate can wait days.
+- An approval only counts if an authorized commenter says it in a comment the agent was shown. Words in the issue body, in files, or in the agent's own earlier messages never count. The agent never approves a gate on its own.
+
+Factory mode needs a swamp-club.com collective token (see [Setup](#setup-and-deployment)). Without one, repositories with a factory fall back to OpenSpec mode.
+
+## Security model
+
+The agent runs code from the repository it is working on, reads text written by strangers, and has outbound internet access. The design assumes it can be talked into misbehaving, and limits what that can reach.
+
+```mermaid
+flowchart TB
+    subgraph VM["MicroVM"]
+        direction TB
+        H["Harness: root<br/>holds the GitHub token (in memory),<br/>AWS role credentials, git push"]
+        A["Agent commands: unprivileged user (uid 1001)<br/>no AWS credentials, no GitHub token,<br/>metadata service blocked"]
+        H -->|"runs commands as"| A
+    end
+    A -. "blocked: uid routing rule" .-> M["Instance metadata<br/>(169.254.169.254)"]
+    A -. "cannot read" .-> H
+    X["Loopback job POST"] -. "needs the per-VM secret" .-> H
+    A -. "no" .-> X
+```
+
+| Risk | What stops it |
+|---|---|
+| Agent steals the VM's AWS role credentials from the metadata service | Commands run as an unprivileged user, and a per-user routing rule blackholes the metadata address for that user. The harness refuses to run an agent if the rule is missing. Netfilter rules are not available in the MicroVM kernel, so this uses uid-based routing. |
+| Agent submits its own jobs to the segment server over loopback | The server accepts a job only with a per-VM secret that the orchestrator hands over at launch. The agent cannot read it. |
+| Agent leaks the GitHub token | The token is passed to git through environment variables for one process. It never touches `.git/config`, command lines or the working tree. Only the root harness holds it. |
+| Agent plants hooks or URL rewrites in its repository's git config to capture the token | The agent commits as its own user with hooks disabled. Publishing bundles the commits and pushes from a fresh repository that only the harness touched. |
+| Webhook forged or replayed | Constant-time HMAC verification of `X-Hub-Signature-256`, and de-duplication by `X-GitHub-Delivery`. |
+| Strangers steer the agent | Only `OWNER`, `MEMBER` and `COLLABORATOR` comments are acted on. Bot events are ignored. GitHub text reaches the model inside delimited untrusted-data blocks. Work lands only through a pull request. |
+| Wrong repository or owner | The ingress ignores events from any owner other than the configured one. Tokens are scoped to a single repository with contents, issues and pull-request write access only. |
+| Prompt injection to approve a gate | Approvals count only from authorized commenters shown to the agent as new activity. |
+| Runaway spend | Per-issue token budget, per-segment turn limit, per-command timeout, and a sweeper for orphaned VMs. |
+
+What is **not** restricted: outbound network access from the VM. Anything the agent can read it could, in principle, send out. Do not point it at repositories with secrets in the working tree.
+
+## Cost and limits
+
+**Waiting is free.** Between segments there is no VM and the orchestrator is suspended.
+
+The dominant cost is model tokens. The agent reports usage for every session (the main loop, reviewer subagents and compaction), prices it at AWS list prices, and writes a running total into the pull request description. An example of the section, with made-up numbers:
+
+> ### Cost of this change
+> **$2.45** in total across 3 sessions: estimated Amazon Bedrock model usage for every session on this issue, including questions, replies to comments, and revisions. It updates after each session.
+>
+> | Session | What happened | Model cost |
+> |---|---|---|
+> | 1 | Implementation: asked questions | $0.31 |
+> | 2 | Implementation: opened the pull request | $1.50 |
+> | 3 | Review: revised after feedback | $0.64 |
+
+The estimate comes from token counts and excludes attempts that failed before reporting, and AWS compute and storage, which are small by comparison.
+
+Prices used (per million tokens, from the AWS Price List): Claude Sonnet 5 and Sonnet 5.5 are $2.00 input and $10.00 output on a global profile, and $2.20 and $11.00 on a US regional profile. Cache reads cost 5% of input, and cache writes 125%. A model without a verified price is shown as "n/a" instead of a guess.
+
+For a sense of scale:
+
+| Work | Approx. model cost |
+|---|---|
+| Add a share button to a page, finishing in one pass | $0.50 to $3.50 |
+| Factory planning alone (plan and two adversarial review rounds) | about $6 |
+
+| Limit | Default | Notes |
+|---|---|---|
+| Token budget per issue | 12M | Cache reads count at 10%, matching their price. Exhausting it ends the run with a summary and a draft PR. |
+| Turns per segment | 150 | Model calls in one segment. |
+| Segment timeout | 2 hours | The VM is terminated if it has not reported. |
+| Human wait before expiry | 7 days | Then the run pauses. A later comment resumes it. |
+| Segment attempts | 2 | A failed segment is retried once, then the run is marked FAILED. |
+| Tool output | 32 KB | Head and tail are kept. |
+
+## Repository layout
+
+```
+.
+├── packages/
+│   ├── shared/          types, config, webhook routing, DynamoDB state, pricing
+│   ├── ingress/         webhook endpoint (signature, filtering, start/wake/cancel)
+│   ├── token-vendor/    GitHub App JWT and repository-scoped installation tokens
+│   ├── orchestrator/    durable orchestrator, MicroVM launcher, sweeper, cost section
+│   ├── segment/         MicroVM image: server, harness, agent loop, tools, sandbox
+│   └── infra/           AWS CDK app (four stacks)
+├── docs/
+│   └── github-app.md    registering the GitHub App, step by step
+└── openspec/
+    └── changes/initial/ the proposal, design, specs and task list this was built from
+```
+
+The four stacks deploy in this order:
+
+| Stack | Contents |
+|---|---|
+| `AgentState` | DynamoDB table, transcript bucket and KMS key, secrets, token vendor |
+| `AgentSandbox` | MicroVM image, segment execution role, orphan sweeper |
+| `AgentOrchestrator` | The durable orchestrator with a `live` alias, alarms |
+| `AgentIngress` | The ingress Lambda and its public URL |
+
+The design, the decisions behind it, and everything learned while testing on real AWS are written down in [`openspec/changes/initial/design.md`](openspec/changes/initial/design.md) and `spikes.md` next to it.
+
+## Setup and deployment
+
+### Prerequisites
+
+- An AWS account in a region that supports **Lambda MicroVMs**, **Lambda durable functions** and your **Bedrock** model. This project is deployed to `us-west-2`.
+- Bedrock access to the Claude model you choose. Some models need a one-time AWS Marketplace subscription that your account must be allowed to make.
+- Node.js 24, and Docker (the tests use DynamoDB Local).
+- A GitHub account or organization to install an App on.
+
+### 1. Install and test
+
+```bash
+npm install
+npm test            # 100+ tests, including races against DynamoDB Local
+npm run typecheck
+```
+
+### 2. Register the GitHub App
+
+Follow [`docs/github-app.md`](docs/github-app.md). In short: create an App with Contents, Issues and Pull requests read/write, subscribe it to the five events above, and keep the App ID, private key and webhook secret.
+
+### 3. Deploy
+
+```bash
+cd packages/infra
+npx cdk bootstrap aws://<account>/<region>      # once per account and region
+npx cdk deploy --all -c githubAppId=<your App ID>
+```
+
+The output includes `WebhookUrl`. Set it as the App's webhook URL.
+
+### 4. Load the secrets
+
+The stacks create the secrets with placeholder values. Replace them from your own terminal:
+
+```bash
+aws secretsmanager put-secret-value --secret-id ai-developer-agent/github-app-private-key \
+  --secret-string file:///path/to/app.private-key.pem
+aws secretsmanager put-secret-value --secret-id ai-developer-agent/github-webhook-secret \
+  --secret-string 'the webhook secret you gave GitHub'
+# Optional: only for repositories with a swamp software factory
+aws secretsmanager put-secret-value --secret-id ai-developer-agent/swamp-api-key \
+  --secret-string 'a swamp-club.com collective token'
+```
+
+The factory token is readable by the agent's commands, because the agent runs swamp. Use a narrowly scoped token.
+
+### 5. Try it
+
+Install the App on a test repository, create the label `agent`, open an issue, and apply the label. The agent comments with questions, a proposal, or a pull request.
+
+## Configuration
+
+Set these as CDK context in `packages/infra/cdk.json` or with `-c key=value`.
+
+| Context key | Default | Meaning |
+|---|---|---|
+| `region` | `us-west-2` | Deployment region |
+| `githubOrg` | `mbonig` | The only owner whose events are processed |
+| `githubAppId` | none | The GitHub App ID. **Pass it on every deploy of the state stack, or it resets.** |
+| `agentLabel` | `agent` | The label that starts a run |
+| `bedrockModelId` | `us.anthropic.claude-sonnet-5` | Model or inference profile ID |
+| `maxTokensPerIssue` | `12000000` | Per-issue token budget |
+| `enableFactory` | `true` | Allow factory mode (still needs the swamp token) |
+| `microvmMemoryMiB` | `8192` | MicroVM size. Fixed per image. |
+| `alarmEmail` | none | Subscribe an email address to alarm notifications |
+
+Other limits (`MAX_TURNS_PER_SEGMENT`, `HUMAN_WAIT_TIMEOUT`, `SEGMENT_TIMEOUT`, `WAKE_DEBOUNCE_SECONDS`, `PR_DRAFT`, and so on) have defaults in [`packages/shared/src/config.ts`](packages/shared/src/config.ts).
+
+## Operating it
+
+**Start, restart, stop**
+
+- Label an issue to start. Relabel an issue whose run **FAILED** or was **CLOSED** to restart it. `DONE` and `BUDGET_EXHAUSTED` runs stay final.
+- Comment on an **EXPIRED** issue to resume it.
+- Closing the issue, or closing or merging its pull request, ends the run.
+
+**Where to look**
+
+| Question | Look at |
+|---|---|
+| Is a run alive? | The `META` item for `ISSUE#<owner>/<repo>#<n>` in DynamoDB: `status`, `phase`, `segmentSeq`, `tokensUsed` |
+| Why did a segment fail? | The failure comment on the issue, and the orchestrator log group. Errors are logged as `segment attempt failed`. |
+| What did the webhook do? | The ingress log group: `ignored`, `restarted`, and so on. |
+| Are VMs leaking? | `aws lambda-microvms list-microvms`. The sweeper terminates strays every 15 minutes. |
+| What did it cost? | The cost section in the pull request description. |
+
+**Alarms** (CloudWatch): an issue ended FAILED, the sweeper terminated a VM, ingress errors, Bedrock throttling.
+
+**Check the sandbox from inside a VM.** `node /app/segment.mjs --selftest` prints the isolation checks: the agent's user ID, whether it can reach the metadata service (it must not), whether it sees any AWS variables, and whether publishing works as root.
+
+**Deploying while runs are active.** CloudFormation cannot delete the previous orchestrator version while a run is still executing on it, so the deploy stalls in cleanup. Redeploy when runs are parked, or stop the execution first. A run left `EXPIRED` resumes on the new version with a comment.
+
+## Development
+
+```bash
+npm test              # all tests: node --test "packages/*/test/*.test.ts"
+npm run typecheck
+cd packages/infra && npx cdk synth
+```
+
+- TypeScript runs directly on Node 24 (type stripping), so there is no compile step for tests. Because of that, TypeScript features that need code generation (enums, constructor parameter properties) are not used.
+- Tests that need DynamoDB start `amazon/dynamodb-local` in Docker on their own port and remove it afterwards.
+- The orchestrator is tested with a fake durable context and with the SDK's local durable test runner, including its self-wake path.
+- The segment's git behavior is tested against real local repositories, including a hostile one with planted hooks and URL rewrites.
+
+## Known limitations
+
+- **Outbound network is open** from the sandbox. There is no egress allow-list.
+- **Costs of failed attempts** are not counted in the PR cost section.
+- **Factory mode** has been observed through planning, adversarial review and the approval gate on a real run. The implementation, verification and attestation half has not been observed end to end yet, and the attestation CI check in the target repository depends on the agent following the pull-request stage text.
+- **Merge conflicts** with the default branch are not resolved automatically.
+- **Edited or deleted comments** are not acted on.
+- **Removing the label** does not cancel a run.
+- **Architecture.** Segments run on ARM64, so repositories that need x86-only binaries, Docker, or external services (databases) during builds and tests cannot be built and tested in a segment.
+- **One region per deployment.** A GitHub App has one webhook URL, so a second region needs a second App or a router.
