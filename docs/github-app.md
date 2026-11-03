@@ -25,6 +25,7 @@ For an org, use the org's Settings → Developer settings instead.
 | Contents | Read and write |
 | Issues | Read and write |
 | Pull requests | Read and write |
+| Workflows | Read and write (only needed for issues that change `.github/workflows/`; GitHub rejects pushes that touch workflow files without it) |
 | Metadata | Read-only (selected automatically) |
 
 **Subscribe to events**
