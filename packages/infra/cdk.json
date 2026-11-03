@@ -5,7 +5,7 @@
     "githubOrg": "mbonig",
     "agentLabel": "agent",
     "bedrockModelId": "us.anthropic.claude-sonnet-5",
-    "maxTokensPerIssue": "12000000",
+    "maxTokensPerIssue": "16000000",
     "githubAppId": "5574573",
     "enableFactory": "true"
   }

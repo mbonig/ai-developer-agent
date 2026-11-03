@@ -109,10 +109,10 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     } else {
       const c = await compactIfNeeded({
         converse: d.converse, modelId: d.config.bedrockModelId, messages, thresholdTokens: d.config.transcriptCompactTokens,
-        diff: await g.diffAgainstDefault(work, base).catch(() => ''),
+        diff: await g.diffAgainstDefault(work, base).catch(() => ''), log,
       });
       messages = c.messages; overhead = c.tokensUsed; overheadUsage = c.usage;
-      if (c.compacted) log('transcript compacted');
+      if (c.compacted) log('transcript compacted', { usedFallback: !!c.usedFallback });
       appendUserTurn(messages, [{ text: followUpTurn(inbox) }]);
     }
 

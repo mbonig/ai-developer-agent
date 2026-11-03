@@ -46,7 +46,7 @@ export function appendUserTurn(messages: Message[], blocks: ContentBlock[]): voi
   else messages.push({ role: 'user', content: blocks });
 }
 
-async function callWithRetry(converse: ConverseFn, input: ConverseCommandInput, sleep: (ms: number) => Promise<void>): Promise<ConverseCommandOutput> {
+export async function callWithRetry(converse: ConverseFn, input: ConverseCommandInput, sleep: (ms: number) => Promise<void>): Promise<ConverseCommandOutput> {
   for (let attempt = 1; ; attempt++) {
     try { return await converse(input); }
     catch (e) {

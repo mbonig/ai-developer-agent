@@ -23,7 +23,7 @@ export function settings(scope: Construct): AppSettings {
     agentLabel: get('agentLabel', 'agent'),
     githubAppId: get('githubAppId', '0'), // set with: -c githubAppId=<id>
     bedrockModelId: get('bedrockModelId', 'us.anthropic.claude-sonnet-5'),
-    maxTokensPerIssue: get('maxTokensPerIssue', '12000000'),
+    maxTokensPerIssue: get('maxTokensPerIssue', '16000000'),
     microvmBaseImageVersion: get('microvmBaseImageVersion', '3'), 
     microvmMemoryMiB: Number(get('microvmMemoryMiB', '8192')),
     enableFactory: get('enableFactory', 'true'),

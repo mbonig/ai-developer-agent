@@ -178,3 +178,30 @@ test('run_subagent runs a clean read-only reviewer session and returns its repor
   assert.match(JSON.stringify(requests[3].messages), /none critical/);
   assert.equal(r.tokensUsed, 110 + 520 + 630 + 110);
 });
+
+test('compaction never fails the run: it retries with a larger allowance, then falls back to the real transcript', async () => {
+  const noText = (stop = 'max_tokens'): ConverseCommandOutput => ({ output: { message: { role: 'assistant', content: [] } }, stopReason: stop, usage: { inputTokens: 1000, outputTokens: 8000, totalTokens: 0 }, $metadata: {}, metrics: { latencyMs: 0 } }) as unknown as ConverseCommandOutput;
+  const text = (s: string) => reply([{ text: s }], { inputTokens: 1000, outputTokens: 500 }, 'end_turn');
+  const big: Message[] = [{ role: 'user', content: [{ text: 'THE-REQUEST ' + 'x'.repeat(2000) }] }, { role: 'assistant', content: [{ text: 'y'.repeat(2000) + ' RECENT-WORK' }] }];
+  const noSleep = async () => {};
+
+  // 1. thinking used the whole first allowance: the retry gets a larger one and succeeds
+  const seen: number[] = [];
+  const r1 = await compactIfNeeded({ converse: async (i) => { seen.push(i.inferenceConfig!.maxTokens!); return seen.length === 1 ? noText() : text('Good summary'); }, modelId: 'm', messages: big, thresholdTokens: 100, diff: '', sleep: noSleep });
+  assert.deepEqual(seen, [32000, 64000]); assert.match(r1.messages[0].content![0].text!, /Good summary/); assert.equal(r1.usedFallback, false);
+  assert.equal(r1.tokensUsed, 9000 + 1500); assert.equal(r1.usage.output, 8500);                                  // both attempts are charged
+
+  // 2. never any text: the end of the real transcript is used, and the run goes on
+  const r2 = await compactIfNeeded({ converse: async () => noText(), modelId: 'm', messages: big, thresholdTokens: 100, diff: '+a line', sleep: noSleep });
+  assert.equal(r2.compacted, true); assert.equal(r2.usedFallback, true);
+  assert.match(r2.messages[0].content![0].text!, /could not be produced/); assert.match(r2.messages[0].content![0].text!, /RECENT-WORK/); assert.match(r2.messages[0].content![0].text!, /\+a line/);
+
+  // 3. the model call itself fails
+  const r3 = await compactIfNeeded({ converse: async () => { throw Object.assign(new Error('bad request'), { name: 'ValidationException' }); }, modelId: 'm', messages: big, thresholdTokens: 100, diff: '', sleep: noSleep });
+  assert.equal(r3.usedFallback, true);
+
+  // 4. a very long transcript is bounded before it is sent
+  const long: Message[] = Array.from({ length: 400 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: [{ text: `m${i} ` + 'z'.repeat(2000) }] }) as Message);
+  let sent = 0; await compactIfNeeded({ converse: async (i) => { sent = JSON.stringify(i.messages).length; return text('ok'); }, modelId: 'm', messages: long, thresholdTokens: 100, diff: '', sleep: noSleep });
+  assert.ok(sent < 450_000 && sent > 100_000, String(sent));
+});
