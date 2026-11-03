@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { addUsage, emptyUsage, weightedTokens, type Phase, type SegmentOutcome, type Usage } from '@agent/shared';
 import type { RunAs } from './sandbox.ts';
 
@@ -91,6 +91,7 @@ export interface OneRun { state: StreamState; budgetKilled: boolean; timedOut: b
 export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
   writeFileSync(a.mcpConfigPath, JSON.stringify({ mcpServers: { harness: { command: a.mcp.command, args: a.mcp.args, env: { HARNESS_OUTCOME_FILE: a.outcomeFile, HARNESS_PHASE: a.phase } } } }));
   // Bypass mode only takes effect when consent is recorded in the user settings; a fresh config directory has none, and Claude Code then silently falls back to the default mode and denies every tool.
+  mkdirSync(a.configDir, { recursive: true });
   const settingsFile = `${a.configDir}/settings.json`;
   let settings: Record<string, unknown> = {};
   try { settings = JSON.parse(readFileSync(settingsFile, 'utf8')); } catch { /* none yet */ }
