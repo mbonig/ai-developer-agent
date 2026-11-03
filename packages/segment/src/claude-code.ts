@@ -121,6 +121,14 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
   });
 }
 
+/** The subscription token was rejected. Retrying cannot help, so this maps to a non-retryable failure code. */
+export class ClaudeAuthError extends Error { code = 'BACKEND_NOT_CONFIGURED'; }
+
+export function isAuthFailure(r: { text: string; apiErrorStatus?: unknown }): boolean {
+  if (r.apiErrorStatus === 401) return true;
+  return /invalid (api key|bearer|token|authentication)|not logged in|please run \/login|authentication[_ ]error|oauth token (has )?expired|failed to authenticate|\b401\b/i.test(r.text);
+}
+
 export interface ClaudeSessionResult { outcome: SegmentOutcome; usage: Usage; costUsd?: number; sessionId: string; tokensUsed: number }
 
 const NUDGE = 'You have not finished. If the work is complete, call mcp__harness__finish. If you are blocked, call mcp__harness__ask_questions. Do not stop without calling one of them.';
@@ -161,6 +169,7 @@ export async function runClaudeSession(a: ClaudeRunArgs): Promise<ClaudeSessionR
     if (wait !== undefined) return done({ type: 'rate_limited', retryAfterSeconds: wait });
     if (!s.result) throw new Error(`Claude Code ended without a result (exit ${run.exitCode}): ${run.stderr.slice(-300)}`);
     if (s.result.subtype === 'error_max_turns' || s.result.terminalReason === 'max_turns') return done({ type: 'continue' });
+    if (s.result.isError && isAuthFailure(s.result)) throw new ClaudeAuthError(`Claude Code could not authenticate. The subscription token is missing, invalid or expired. Run \`claude setup-token\` and store the new token in the ai-developer-agent/claude-code-oauth-token secret. Detail: ${s.result.text.slice(0, 200)}`);
     if (s.result.isError) throw new Error(`Claude Code failed (${s.result.subtype ?? 'error'}): ${s.result.text.slice(0, 300)}`);
 
     // It finished talking without a terminal tool. Resume once and ask it to call one.

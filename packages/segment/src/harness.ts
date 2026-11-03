@@ -213,9 +213,9 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
       ...outcome, tokensUsed, headSha, usage, billing, ...(cost !== undefined ? { costUsd: cost } : {}), ...(publishedBranch ? { branch: publishedBranch } : {}),
     });
   } catch (e) {
-    const code = e instanceof Coded ? e.code : 'SEGMENT_ERROR';
+    const code = e instanceof Coded ? e.code : (e as { code?: unknown }).code === 'BACKEND_NOT_CONFIGURED' ? 'BACKEND_NOT_CONFIGURED' : 'SEGMENT_ERROR';
     log('segment failed', { code, message: (e as Error).message });
-    await d.reportFailure(job.callbackId, code, (e as Error).message.slice(0, 500)).catch((e2) => log('failure report failed', { message: String(e2) }));
+    await d.reportFailure(job.callbackId, code, (code === 'BACKEND_NOT_CONFIGURED' ? `BACKEND_NOT_CONFIGURED: ${(e as Error).message}` : (e as Error).message).slice(0, 500)).catch((e2) => log('failure report failed', { message: String(e2) }));
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
