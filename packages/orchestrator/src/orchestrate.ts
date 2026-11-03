@@ -63,6 +63,21 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
       return { status: 'BUDGET_EXHAUSTED' };
     }
 
+    // Say so when a run begins, so people are not left wondering: the first session is silent until it has questions or a pull request.
+    if (iter === 1) {
+      const resumed = meta.segmentSeq > 0;
+      await ctx.step('started-comment', async () => {
+        try {
+          await d.github.postComment({
+            installationId: meta.installationId, owner, repo, number: meta.prNumber ?? issueNumber, marker: `${key}:start:${meta.segmentSeq}`,
+            body: resumed
+              ? 'I am picking this back up now. I will comment here when I have questions, an update, or a pull request.'
+              : 'I have started working on this. I will comment here when I have questions or a pull request. A session often takes 20 to 45 minutes, so it may be quiet until then.',
+          });
+        } catch (e) { d.log?.('started comment failed', { issueKey: key, error: String((e as Error)?.message ?? e).slice(0, 200) }); } // never let this block the work
+      });
+    }
+
     const claimed = await ctx.step(`claim-${iter}`, async () => (await getMeta(store, key))!.inboxSeq);
     const segmentSeq = await ctx.step(`begin-${iter}`, () => beginSegment(store, key));
     const target = meta.prNumber ?? issueNumber;

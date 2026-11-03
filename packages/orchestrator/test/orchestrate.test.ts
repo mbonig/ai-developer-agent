@@ -21,7 +21,7 @@ type Reply = () => Promise<object | 'timeout'>;
 
 function harness(segments: Seg[], replies: Reply[], opts: { noCommits?: boolean } = {}) {
   const log = { steps: [] as string[], waits: [] as string[], jobs: [] as SegmentJob[], launched: 0, terminated: [] as string[],
-    comments: [] as string[], prs: [] as string[], selfWakes: [] as string[], cost: [] as string[] };
+    comments: [] as string[], started: [] as string[], prs: [] as string[], selfWakes: [] as string[], cost: [] as string[] };
   let lastJob: SegmentJob | undefined;
   const ctx = {
     step: async (name: string, fn: () => unknown) => { log.steps.push(name); return fn(); },
@@ -40,7 +40,7 @@ function harness(segments: Seg[], replies: Reply[], opts: { noCommits?: boolean 
     },
   } as unknown as Ctx;
   const github: GithubApi = {
-    async postComment(a) { const m = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(m + '|'))) return false; log.comments.push(`${m}|${a.body}`); return true; },
+    async postComment(a) { if (a.marker.includes(':start:')) { log.started.push(`${a.number}|${a.body}`); return true; } const m = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(m + '|'))) return false; log.comments.push(`${m}|${a.body}`); return true; },
     async upsertPrSection(a) { log.cost.push(`${a.number}|${a.markdown}`); },
     async openPr(a) { if (opts.noCommits) return undefined; log.prs.push(`${a.head}|${a.title}|${a.body}|${a.draft}`); return 77; },
   };
@@ -382,4 +382,35 @@ test('billing is recorded per session, so the PR section can tell the backends a
     [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
   await orchestrate(ctx, { issueKey: key }, deps);
   assert.match(log.cost.at(-1)!, /included in the subscription \(API-equivalent \$1\.25\)/);
+});
+
+test('a run says it has started: once per run, on the issue the first time and as a resume afterwards, and never blocks the work', async () => {
+  const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a' });
+  const cancel = (key: string) => async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; };
+
+  // a brand new issue: one comment on the issue, even though the run goes through several continued sessions
+  const a = await fresh(); const num = Number(a.key.split('#').pop());
+  const h1 = harness([cont, cont, () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })], [cancel(a.key)]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.equal(h1.log.started.length, 1);
+  assert.match(h1.log.started[0], new RegExp(`^${num}\\\\|I have started working on this`)); assert.match(h1.log.started[0], /20 to 45 minutes/);
+  assert.equal(h1.log.comments.length, 1);                                      // only the questions: the started comment is separate
+
+  // a run that already did sessions (restart or resume after expiry) says it is picking the work back up, on the PR when there is one
+  const b = await fresh(); await setStatus(b.key, { segmentSeq: 3, prNumber: 55 });
+  const h2 = harness([() => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'c' })], [cancel(b.key)]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.match(h2.log.started[0], /^55\|I am picking this back up/);
+
+  // the comment is keyed by where the run starts, so a replay of the same start does not repeat it
+  assert.equal(new Set([h1.log.started[0]]).size, 1);
+
+  // if posting it fails, the work still runs
+  const c = await fresh();
+  const h3 = harness([() => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'd' })], [cancel(c.key)]);
+  const real = h3.deps.github.postComment;
+  h3.deps.github.postComment = async (x) => { if (x.marker.includes(':start:')) throw new Error('GitHub is down'); return real(x); };
+  const logged: string[] = []; h3.deps.log = (m) => { logged.push(m); };
+  await orchestrate(h3.ctx, { issueKey: c.key }, h3.deps);
+  assert.equal(h3.log.launched, 1); assert.ok(logged.includes('started comment failed'));
 });

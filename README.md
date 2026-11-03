@@ -97,6 +97,7 @@ sequenceDiagram
     H->>GH: Label issue "agent"
     GH->>IN: issues.labeled webhook
     IN->>OR: start execution (one per issue)
+    OR->>GH: comment "I have started working on this"
     OR->>VM: launch VM, POST the job
     VM->>GH: clone repository (scoped token)
     loop tool-use loop
