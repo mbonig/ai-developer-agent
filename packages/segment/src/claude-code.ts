@@ -90,6 +90,11 @@ export interface OneRun { state: StreamState; budgetKilled: boolean; timedOut: b
 /** Runs `claude -p` once. Never throws for a non-zero exit: the caller decides from the stream and the outcome file. */
 export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
   writeFileSync(a.mcpConfigPath, JSON.stringify({ mcpServers: { harness: { command: a.mcp.command, args: a.mcp.args, env: { HARNESS_OUTCOME_FILE: a.outcomeFile, HARNESS_PHASE: a.phase } } } }));
+  // Bypass mode only takes effect when consent is recorded in the user settings; a fresh config directory has none, and Claude Code then silently falls back to the default mode and denies every tool.
+  const settingsFile = `${a.configDir}/settings.json`;
+  let settings: Record<string, unknown> = {};
+  try { settings = JSON.parse(readFileSync(settingsFile, 'utf8')); } catch { /* none yet */ }
+  writeFileSync(settingsFile, JSON.stringify({ ...settings, skipDangerousModePermissionPrompt: true }));
   const args = [
     '-p', a.prompt, '--output-format', 'stream-json', '--verbose',
     // The MicroVM is the sandbox and this runs as a non-root user, so Claude Code's own permission prompts add nothing.
