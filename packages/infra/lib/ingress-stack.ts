@@ -29,6 +29,7 @@ export class IngressStack extends Stack {
         ORCHESTRATOR_FUNCTION_ARN: orchestrator.alias.functionArn, // qualified ARN, required for durable invocations
         GITHUB_ORG: cfg.githubOrg,
         AGENT_LABEL: cfg.agentLabel,
+        MAX_TOKENS_PER_ISSUE: cfg.maxTokensPerIssue,
       },
     });
     state.table.grantReadWriteData(this.fn);

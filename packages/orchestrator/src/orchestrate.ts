@@ -20,6 +20,9 @@ export interface OrchDeps {
   log?(msg: string, extra?: Record<string, unknown>): void;
 }
 
+/** Sessions in a row that may end at the turn limit before the agent stops to tell people where it is. Tokens remain the real limit. */
+const MAX_AUTO_CONTINUES = 6;
+
 const parseKey = (k: string) => {
   const m = /^ISSUE#([^/]+)\/([^#]+)#(\d+)$/.exec(k);
   if (!m) throw new Error(`bad issue key ${k}`);
@@ -42,6 +45,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     return { status };
   };
 
+  let continues = 0;
   for (let iter = 1; ; iter++) {
     const meta = (await ctx.step(`load-${iter}`, () => getMeta(store, key)))!;
     if (!meta) throw new Error(`no state for ${key}`);
@@ -123,7 +127,15 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     const after = (await ctx.step(`reload-${iter}`, () => getMeta(store, key)))!;
     if (after.cancelRequested) return finalizeCancel(iter, after);
 
+    if (r.type !== 'continue') continues = 0;
     switch (r.type) {
+      case 'continue':
+        // The session ran out of turns, not tokens. The work is saved, so start the next session without waiting for anyone.
+        if (++continues <= MAX_AUTO_CONTINUES) { d.log?.('continuing after turn limit', { issueKey: key, segmentSeq, continues }); continue; }
+        continues = 0;
+        await comment(`continue-comment-${iter}`, meta, target,
+          `I have worked through ${MAX_AUTO_CONTINUES + 1} sessions in a row and am not finished. I am pausing so you can see where things stand. Reply (anything is fine) and I will keep going.`, `${segmentSeq}:continue`);
+        break;
       case 'questions':
         await comment(`q-comment-${iter}`, meta, target, r.markdown, `${segmentSeq}`);
         break;

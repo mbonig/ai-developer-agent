@@ -5,7 +5,7 @@ import {
 
 export interface Deps {
   store: Store;
-  config: Pick<Config, 'agentLabel' | 'githubOrg'>;
+  config: Pick<Config, 'agentLabel' | 'githubOrg' | 'maxTokensPerIssue'>;
   webhookSecret: string;
   /** Starts a durable execution for the issue and returns its ARN. `attempt` makes the execution name unique. */
   startExecution(issueKey: string, attempt: string): Promise<string>;
@@ -44,7 +44,7 @@ export async function processWebhook(d: Deps, req: Req): Promise<Res> {
       const created = await createMeta(d.store, key, route);
       if (!created) {
         // A FAILED or CLOSED run is restarted by relabeling. The execution name must be new: Lambda returns a finished execution for a reused name.
-        if (await restartTerminal(d.store, key)) {
+        if (await restartTerminal(d.store, key, { maxTokens: d.config.maxTokensPerIssue })) {
           await setExecution(d.store, key, await d.startExecution(key, String(Date.now())));
           d.log('restarted', { key });
           return res(202, 'restarted');

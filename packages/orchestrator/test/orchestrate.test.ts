@@ -286,3 +286,41 @@ test('replaceSection replaces the marked block in place, appends when absent, an
   await gh.upsertPrSection({ ...a, markdown: section('v2') });
   assert.equal(patches.length, 2); assert.ok(body.startsWith('Description') && body.includes('Closes #1') && body.includes('v2') && !body.includes('v1'));
 });
+
+test('a turn-limit session starts the next one immediately, and after too many in a row the agent stops to tell people', async () => {
+  const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a', costUsd: 0.1, usage: U(1, 2, 3, 4) });
+  const a = await fresh();
+  const h1 = harness([cont, cont, () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
+    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.equal(h1.log.launched, 3); assert.equal(h1.log.selfWakes.length, 0);
+  assert.deepEqual(h1.log.waits, []);                              // never waited for a person between the continued sessions
+  assert.equal(h1.log.comments.length, 1); assert.match(h1.log.comments[0], /Which\?/);   // no comment per continued session
+  assert.deepEqual(h1.log.jobs.map((j) => j.segmentSeq), [1, 2, 3]);
+
+  const b = await fresh();
+  const h2 = harness(Array.from({ length: 7 }, () => cont),
+    [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.equal(h2.log.launched, 7);
+  assert.ok(h2.log.comments.some((c) => c.includes('7 sessions in a row')));                 // then it waits for a reply
+  assert.equal((await getMeta(store, b.key))!.status, 'CLOSED');
+});
+
+test('github client: finishing over an existing draft PR updates it and marks it ready; a normal PR is left alone', async () => {
+  const calls: string[] = []; let drafts = true;
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    const path = url.replace('https://api.github.com', ''); calls.push(`${init.method} ${path.split('?')[0]}`);
+    const j = (o: unknown) => new Response(JSON.stringify(o));
+    if (path.startsWith('/graphql')) return j({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
+    if (init.method === 'GET' && path.includes('/pulls')) return j([{ number: 71, draft: drafts, node_id: 'PR_node' }]);
+    return j({});
+  }) as unknown as typeof fetch;
+  const gh = createGithubApi(async () => 't', fetchImpl);
+  const a = { installationId: 1, owner: 'o', repo: 'r', head: 'factory/gh-70', title: 'Real title', body: 'Real body', draft: false };
+  assert.equal(await gh.openPr(a), 71);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('GET')), ['PATCH /repos/o/r/pulls/71', 'POST /graphql']);
+  calls.length = 0; drafts = false;
+  assert.equal(await gh.openPr(a), 71);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('GET')), []);
+});

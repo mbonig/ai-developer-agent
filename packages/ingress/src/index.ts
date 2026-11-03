@@ -21,7 +21,7 @@ export async function handler(event: { headers: Record<string, string>; body?: s
   const rawBody = event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString('utf8') : (event.body ?? '');
   const deps: Deps = {
     store: { doc, table: process.env.TABLE_NAME! },
-    config: { agentLabel: process.env.AGENT_LABEL || 'agent', githubOrg: process.env.GITHUB_ORG || 'mbonig' },
+    config: { agentLabel: process.env.AGENT_LABEL || 'agent', githubOrg: process.env.GITHUB_ORG || 'mbonig', maxTokensPerIssue: Number(process.env.MAX_TOKENS_PER_ISSUE || 0) },
     webhookSecret: await webhookSecret(),
     async startExecution(issueKey, attempt) {
       const r = await lambda.send(new InvokeCommand({

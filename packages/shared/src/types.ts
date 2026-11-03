@@ -61,7 +61,9 @@ export type SegmentOutcome =
   | { type: 'questions'; markdown: string }
   | { type: 'done'; pr: { title: string; body: string } }
   | { type: 'revised'; summaryMarkdown: string }
-  | { type: 'budget_exhausted'; summaryMarkdown: string };
+  | { type: 'budget_exhausted'; summaryMarkdown: string }
+  /** The session hit its turn limit with token budget left. The work is saved and the next session simply carries on. */
+  | { type: 'continue' };
 
 export type SegmentResult = SegmentOutcome & {
   tokensUsed: number; headSha: string;

@@ -80,14 +80,14 @@ test('throttling is retried with backoff; non-retryable errors propagate', async
   await assert.rejects(runAgent(setup([bad]).args), /nope/);
 });
 
-test('turn cap: budget_exhausted with a summary from one final call (no tools run)', async () => {
+test('turn cap: the session ends as "continue" with no summary call, since the work is saved and nobody needs to be asked', async () => {
   const loopTurn = () => reply([use('l', 'list_files', {})]);
-  const { args, requests } = setup([loopTurn(), loopTurn(), reply([{ text: 'Did A, B remains' }], { inputTokens: 50, outputTokens: 5 }, 'end_turn')], { maxTurns: 2 });
+  const { args, requests } = setup([loopTurn(), loopTurn()], { maxTurns: 2 });
   const r = await runAgent(args);
-  assert.deepEqual(r.outcome, { type: 'budget_exhausted', summaryMarkdown: 'Did A, B remains' });
-  assert.equal(requests.length, 3);
-  assert.equal(r.tokensUsed, 110 + 110 + 55);
-  assert.ok(!JSON.stringify(r.messages).includes('out of budget')); // probe turn is not persisted
+  assert.deepEqual(r.outcome, { type: 'continue' });
+  assert.equal(requests.length, 2);                      // no extra summary call
+  assert.equal(r.tokensUsed, 220); assert.deepEqual(r.usage, { input: 200, output: 20, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(r.messages.at(-1)!.role, 'user');         // a valid place to resume: tool results are the last message
 });
 
 test('token budget stops before the next call', async () => {
