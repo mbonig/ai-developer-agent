@@ -87,6 +87,7 @@ export interface ClaudeRunArgs {
 
 export interface OneRun { state: StreamState; budgetKilled: boolean; timedOut: boolean; exitCode: number | null; stderr: string }
 
+const ALLOWED_TOOLS = 'Bash,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,Task,Agent,Skill,TodoWrite,WebFetch,WebSearch,mcp__harness';
 let traced = 0;
 /** Logs the few stream events that explain a failure: the init settings and tool errors. Segment stdout does not reach CloudWatch, so the harness uploads this log to S3. */
 function traceLine(a: ClaudeRunArgs, line: string): void {
@@ -111,6 +112,9 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
     '-p', a.prompt, '--output-format', 'stream-json', '--verbose',
     // The MicroVM is the sandbox and this runs as a non-root user, so Claude Code's own permission prompts add nothing.
     '--dangerously-skip-permissions', '--permission-mode', 'bypassPermissions',
+    // With CLAUDE_CODE_SUBPROCESS_ENV_SCRUB set, Claude Code forces the default permission mode and ignores the bypass flag, so every tool is allowed explicitly.
+    // The MicroVM is still the sandbox. `mcp__harness` allows both harness tools.
+    '--allowedTools', ALLOWED_TOOLS,
     '--mcp-config', a.mcpConfigPath, '--strict-mcp-config',
     '--append-system-prompt', a.systemPrompt,
     ...(a.resume ? ['--resume', a.sessionId] : ['--session-id', a.sessionId]),
