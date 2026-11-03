@@ -22,6 +22,9 @@ export interface OrchDeps {
 
 /** Sessions in a row that may end at the turn limit before the agent stops to tell people where it is. Tokens remain the real limit. */
 const MAX_AUTO_CONTINUES = 6;
+/** Usage-limit waits in a row before the agent stops to tell people. Each wait lasts until the limit resets (capped at 6 hours). */
+const MAX_LIMIT_WAITS = 8;
+const MAX_LIMIT_WAIT_SECONDS = 6 * 3600;
 
 const parseKey = (k: string) => {
   const m = /^ISSUE#([^/]+)\/([^#]+)#(\d+)$/.exec(k);
@@ -45,7 +48,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     return { status };
   };
 
-  let continues = 0;
+  let continues = 0; let limitWaits = 0;
   for (let iter = 1; ; iter++) {
     const meta = (await ctx.step(`load-${iter}`, () => getMeta(store, key)))!;
     if (!meta) throw new Error(`no state for ${key}`);
@@ -108,7 +111,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     const r = result;
     await ctx.step(`account-${iter}`, async () => {
       await addTokens(store, key, r.tokensUsed ?? 0); await consume(store, key, claimed);
-      await recordSessionCost(store, key, { seq: segmentSeq, phase: meta.phase, outcome: r.type, usage: r.usage ?? emptyUsage(), ...(r.costUsd === undefined ? {} : { costUsd: r.costUsd }) });
+      await recordSessionCost(store, key, { seq: segmentSeq, phase: meta.phase, outcome: r.type, usage: r.usage ?? emptyUsage(), ...(r.costUsd === undefined ? {} : { costUsd: r.costUsd }), ...(r.billing === 'subscription' ? { billing: 'subscription' } : {}) });
     });
 
     // The PR description shows what the work has cost so far, across every session on this issue.
@@ -128,7 +131,25 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     if (after.cancelRequested) return finalizeCancel(iter, after);
 
     if (r.type !== 'continue') continues = 0;
+    if (r.type !== 'rate_limited') limitWaits = 0;
     switch (r.type) {
+      case 'rate_limited': {
+        // The Claude subscription's usage window is used up. Wait for it to reset (a durable wait, so no compute), then carry on.
+        const seconds = Math.min(Math.max(r.retryAfterSeconds, 60), MAX_LIMIT_WAIT_SECONDS);
+        if (++limitWaits === 1) {
+          await comment(`limit-comment-${iter}`, meta, target,
+            `I have used up my Claude usage limit for now. I will carry on in about ${Math.max(1, Math.round(seconds / 60))} minutes, when it resets.`, `${segmentSeq}:limit`);
+        }
+        if (limitWaits <= MAX_LIMIT_WAITS) {
+          d.log?.('usage limit reached, waiting', { issueKey: key, segmentSeq, seconds, limitWaits });
+          await ctx.wait(`limit-wait-${iter}`, { seconds });
+          continue;
+        }
+        limitWaits = 0;
+        await comment(`limit-pause-comment-${iter}`, meta, target,
+          'I keep hitting my Claude usage limit, so I am pausing here. Reply (anything is fine) when you want me to try again.', `${segmentSeq}:limitpause`);
+        break;
+      }
       case 'continue':
         // The session ran out of turns, not tokens. The work is saved, so start the next session without waiting for anyone.
         if (++continues <= MAX_AUTO_CONTINUES) { d.log?.('continuing after turn limit', { issueKey: key, segmentSeq, continues }); continue; }

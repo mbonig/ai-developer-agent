@@ -1,6 +1,14 @@
 import type { InboxMessage, Phase } from '@agent/shared';
 import type { WorkMode } from './mode.ts';
 
+export type PromptBackend = 'bedrock' | 'claude-code';
+
+const CLAUDE_CODE_NOTES = `Environment (Claude Code):
+- You are running as Claude Code inside a sandbox, with your usual tools. The repository's own CLAUDE.md, skills and commands apply.
+- The tools ask_questions and finish described below are provided by the harness as mcp__harness__ask_questions and mcp__harness__finish. Use those exact names. Call exactly one of them when you stop, then stop.
+- Wherever these instructions mention run_subagent, use your own subagent tool (Task) instead. Wherever they mention view_image, use the Read tool on the image file.
+- Do not run git commit or git push for your normal work. The harness commits and publishes your working tree when you stop. (The factory's own worktree commits are fine.)`;
+
 const TAG = 'untrusted_github_content';
 
 /** Wraps GitHub-sourced text so the model sees it as data with attribution, never as instructions. */
@@ -46,7 +54,12 @@ const FACTORY = `How to work in this repository (swamp software factory):
 - Finishing: when the pull-request stage is reached, do not push or run gh. Compose the pull request exactly as that stage describes (title, the proposal as the body, the Attestation section with the digest, and the Closes line), then call finish with that title and body. The harness pushes branch factory/gh-<n> and opens the pull request from it. Then record the pull-request product as far as you can without a URL: use number 0 and say in your final message that the harness opened it.
 - After the pull request exists, review comments mean: if they ask for changes, send the work item back through the factory's own revise path, and finish with a summary. Do not edit code outside the factory's stages.`;
 
-export function systemPrompt(phase: Phase, branch: string, repoSlug?: string, mode: WorkMode = 'plain'): string {
+export function systemPrompt(phase: Phase, branch: string, repoSlug?: string, mode: WorkMode = 'plain', backend: PromptBackend = 'bedrock'): string {
+  const base = systemPromptBody(phase, branch, repoSlug, mode);
+  return backend === 'claude-code' ? `${CLAUDE_CODE_NOTES}\n\n${base}` : base;
+}
+
+function systemPromptBody(phase: Phase, branch: string, repoSlug?: string, mode: WorkMode = 'plain'): string {
   const blob = repoSlug ? `https://github.com/${repoSlug}/blob/${branch}/<path>` : 'the file\'s blob URL on the branch';
   return `You are an autonomous software engineer working inside a checked-out git repository on branch "${branch}".
 

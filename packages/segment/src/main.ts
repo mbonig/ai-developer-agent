@@ -14,6 +14,14 @@ import { selftest } from './selftest.ts';
 import { parseTranscript, serializeTranscript } from './transcript.ts';
 
 const factoryStateKey = (job: SegmentJob) => `factory-state/${job.owner}/${job.repo}/${job.issueNumber}.tgz`;
+const claudeSessionKey = (job: SegmentJob) => `claude-session/${job.owner}/${job.repo}/${job.issueNumber}.tgz`;
+
+// `node segment.mjs --mcp-server` is how Claude Code starts the harness's MCP server (the outcome tools).
+if (process.argv.includes('--mcp-server')) {
+  const { runMcpServer } = await import('./mcp-server.ts');
+  runMcpServer();
+  await new Promise(() => {}); // runs until Claude Code closes its end
+}
 
 /** Builds AWS clients. Called only after a job arrives, never at image snapshot time. */
 function buildDeps(): HarnessDeps {
@@ -59,6 +67,26 @@ function buildDeps(): HarnessDeps {
       if (!arn) return undefined;
       const v = (await new SecretsManagerClient({ region }).send(new GetSecretValueCommand({ SecretId: arn }))).SecretString?.trim();
       return v && v !== 'UNSET' ? v : undefined;
+    },
+    // Which backend runs the agent, and for Claude Code the subscription token from `claude setup-token` ("UNSET" = not configured).
+    agentBackend: config.agentBackend,
+    async getClaudeToken() {
+      const arn = process.env.CLAUDE_CODE_TOKEN_SECRET_ARN;
+      if (!arn) return undefined;
+      const v = (await new SecretsManagerClient({ region }).send(new GetSecretValueCommand({ SecretId: arn }))).SecretString?.trim();
+      return v && v !== 'UNSET' ? v : undefined;
+    },
+    async loadClaudeSession(job) {
+      try {
+        const r = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: claudeSessionKey(job) }));
+        return Buffer.from(await r.Body!.transformToByteArray());
+      } catch (e) {
+        if ((e as { name?: string }).name === 'NoSuchKey') return undefined;
+        throw e;
+      }
+    },
+    async saveClaudeSession(job, state) {
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: claudeSessionKey(job), Body: state, ContentType: 'application/gzip' }));
     },
     async loadFactoryState(job) {
       try {

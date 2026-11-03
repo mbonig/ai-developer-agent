@@ -27,3 +27,6 @@ export function costUsd(u: Usage, modelId: string): number | undefined {
   if (!p) return undefined;
   return (u.input * p.input + u.output * p.output + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite) / 1_000_000;
 }
+
+/** Budget tokens: input + output + cache writes, with cache reads at their ~10% cost weight. */
+export const weightedTokens = (u: Usage): number => u.input + u.output + u.cacheWrite + Math.ceil(u.cacheRead * 0.1);

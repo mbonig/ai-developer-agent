@@ -20,3 +20,13 @@ export async function packFactoryState(factoryDir: string): Promise<Buffer | und
 export async function unpackFactoryState(factoryDir: string, tgz: Buffer): Promise<void> {
   await run(['-xzf', '-'], factoryDir, tgz);
 }
+
+/** Claude Code keeps a conversation as files under its config directory. Segments are disposable, so that directory travels through S3. */
+export async function packDir(dir: string): Promise<Buffer | undefined> {
+  if (!existsSync(dir)) return undefined;
+  return run(['-czf', '-', '.'], dir);
+}
+
+export async function unpackDir(dir: string, tgz: Buffer): Promise<void> {
+  await run(['-xzf', '-'], dir, tgz);
+}

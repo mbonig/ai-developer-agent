@@ -324,3 +324,62 @@ test('github client: finishing over an existing draft PR updates it and marks it
   assert.equal(await gh.openPr(a), 71);
   assert.deepEqual(calls.filter((c) => !c.startsWith('GET')), []);
 });
+
+test('a usage limit waits for the reset with a durable wait and then carries on; after too many it pauses for a human', async () => {
+  const limited = (s: number) => () => ({ type: 'rate_limited', retryAfterSeconds: s, tokensUsed: 0, headSha: 'a' });
+  const a = await fresh();
+  const h1 = harness([limited(900), () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
+    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.deepEqual(h1.log.waits, ['limit-wait-1']);                                   // one wait, no human involved
+  assert.equal(h1.log.launched, 2); assert.equal(h1.log.selfWakes.length, 0);
+  assert.equal(h1.log.comments.filter((c) => c.includes('usage limit')).length, 1);   // said once, when it began
+  assert.match(h1.log.comments.find((c) => c.includes('usage limit'))!, /about 15 minutes/);
+
+  const b = await fresh();
+  const h2 = harness(Array.from({ length: 9 }, () => limited(600)), [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.equal(h2.log.waits.length, 8); assert.equal(h2.log.launched, 9);              // eight waits, then it stops asking the limit to clear
+  assert.ok(h2.log.comments.some((c) => c.includes('keep hitting my Claude usage limit')));
+});
+
+test('a very long limit wait is capped, and a limit wait never runs below a minute', async () => {
+  const mk = (s: number) => () => ({ type: 'rate_limited', retryAfterSeconds: s, tokensUsed: 0, headSha: 'a' });
+  const waitSecs: number[] = [];
+  for (const [asked, expected] of [[999_999, 6 * 3600], [5, 60]] as const) {
+    const { key } = await fresh();
+    const h = harness([mk(asked), () => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'b' })], [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    const orig = (h.ctx as unknown as { wait: (n: string, d: { seconds: number }) => Promise<void> }).wait;
+    (h.ctx as unknown as { wait: unknown }).wait = async (n: string, d: { seconds: number }) => { waitSecs.push(d.seconds); return orig(n, d); };
+    await orchestrate(h.ctx, { issueKey: key }, h.deps);
+    assert.equal(waitSecs.at(-1), expected);
+  }
+});
+
+test('the PR cost section shows subscription sessions as included, with the API-equivalent value, and never as billed money', () => {
+  const only = renderCostSection([
+    { seq: 1, phase: 'IMPLEMENT', outcome: 'questions', billing: 'subscription', costUsd: 1.1, usage: U(1, 2, 3, 4) },
+    { seq: 2, phase: 'IMPLEMENT', outcome: 'rate_limited', billing: 'subscription', costUsd: 0.4, usage: U(1, 2, 3, 4) },
+    { seq: 3, phase: 'REVIEW', outcome: 'revised', billing: 'subscription', costUsd: 2.0, usage: U(1, 2, 3, 4) },
+  ], 'claude-code');
+  assert.match(only, /Included in your Claude subscription/); assert.match(only, /about \$3\.50/);
+  assert.match(only, /\| 1 \| Implementation: asked questions \| included in the subscription \(API-equivalent \$1\.10\) \|/);
+  assert.match(only, /hit the Claude usage limit and waited/); assert.match(only, /no per-token billing/);
+  assert.doesNotMatch(only, /Amazon Bedrock model usage/); assert.match(only, /\| \| \*\*Total\*\* \| \*\*included \(API-equivalent \$3\.50\)\*\* \|/);
+
+  const mixed = renderCostSection([
+    { seq: 1, phase: 'IMPLEMENT', outcome: 'questions', costUsd: 2.0, usage: U(1, 2, 3, 4) },
+    { seq: 2, phase: 'IMPLEMENT', outcome: 'done', billing: 'subscription', costUsd: 5.0, usage: U(1, 2, 3, 4) },
+  ], 'us.anthropic.claude-sonnet-5');
+  assert.match(mixed, /\*\*\$2\.00\*\* in total across 1 session: estimated Amazon Bedrock/);   // only the Bedrock session is money
+  assert.match(mixed, /A further 1 session was included in a Claude subscription \(API-equivalent about \$5\.00, not billed per token\)/);
+});
+
+test('billing is recorded per session, so the PR section can tell the backends apart', async () => {
+  const { key } = await fresh();
+  const { ctx, deps, log } = harness(
+    [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a', costUsd: 1.25, billing: 'subscription', usage: U(1, 2, 3, 4) })],
+    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(ctx, { issueKey: key }, deps);
+  assert.match(log.cost.at(-1)!, /included in the subscription \(API-equivalent \$1\.25\)/);
+});

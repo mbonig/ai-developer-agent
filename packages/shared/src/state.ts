@@ -303,12 +303,14 @@ export async function setBranch(s: Store, pk: string, branch: string): Promise<v
 
 export interface SessionCost {
   seq: number; phase: string; outcome: string; costUsd?: number;
+  /** 'subscription' when the session ran on a Claude subscription (costUsd is then an API-equivalent value). */
+  billing?: string;
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 /** One item per session, keyed by segment number, so a replay overwrites rather than double counts. */
 export async function recordSessionCost(s: Store, pk: string, c: SessionCost): Promise<void> {
-  await s.doc.send(new PutCommand({ TableName: s.table, Item: { PK: pk, SK: `COST#${String(c.seq).padStart(10, '0')}`, ...c, ...(c.costUsd === undefined ? {} : { costUsd: c.costUsd }), recordedAt: now() } }));
+  await s.doc.send(new PutCommand({ TableName: s.table, Item: { PK: pk, SK: `COST#${String(c.seq).padStart(10, '0')}`, ...c, ...(c.costUsd === undefined ? {} : { costUsd: c.costUsd }), ...(c.billing ? { billing: c.billing } : {}), recordedAt: now() } }));
 }
 
 export async function listSessionCosts(s: Store, pk: string): Promise<SessionCost[]> {

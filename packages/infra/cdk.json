@@ -7,6 +7,7 @@
     "bedrockModelId": "us.anthropic.claude-sonnet-5",
     "maxTokensPerIssue": "16000000",
     "githubAppId": "5574573",
-    "enableFactory": "true"
+    "enableFactory": "true",
+    "agentBackend": "bedrock"
   }
 }

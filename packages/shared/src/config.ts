@@ -1,4 +1,8 @@
+export type AgentBackend = 'bedrock' | 'claude-code';
+
 export interface Config {
+  /** Which model backend runs the agent: Amazon Bedrock (default) or Claude Code on a Claude subscription. */
+  agentBackend: AgentBackend;
   githubOrg: string;
   agentLabel: string;
   bedrockModelId: string;
@@ -31,9 +35,13 @@ function int(env: Env, name: string, def?: number): number {
 }
 
 export function loadConfig(env: Env = process.env): Config {
-  const modelId = env.BEDROCK_MODEL_ID;
+  const backend = (env.AGENT_BACKEND || 'bedrock') as string;
+  if (backend !== 'bedrock' && backend !== 'claude-code') throw new Error(`AGENT_BACKEND must be "bedrock" or "claude-code", got "${backend}"`);
+  // The Bedrock model id is only needed by the Bedrock backend.
+  const modelId = env.BEDROCK_MODEL_ID || (backend === 'claude-code' ? 'claude-code' : '');
   if (!modelId) throw new Error('Missing required config BEDROCK_MODEL_ID');
   return {
+    agentBackend: backend,
     githubOrg: env.GITHUB_ORG || 'mbonig',
     agentLabel: env.AGENT_LABEL || 'agent',
     bedrockModelId: modelId,
