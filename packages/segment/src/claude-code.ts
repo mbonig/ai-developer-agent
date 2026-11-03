@@ -167,7 +167,7 @@ function readOutcome(file: string, phase: Phase): SegmentOutcome | undefined {
   if (rec.tool === 'ask_questions') return { type: 'questions', markdown: String(i.markdown ?? '') || '(no questions provided)' };
   if (rec.tool === 'finish') {
     if (phase === 'IMPLEMENT') return { type: 'done', pr: { title: String(i.title ?? '').trim() || 'Implement issue', body: String(i.body ?? '') } };
-    return { type: 'revised', summaryMarkdown: String(i.summary ?? '') || 'Addressed the feedback.' };
+    return { type: 'revised', summaryMarkdown: String(i.summary ?? i.body ?? '') || 'Addressed the feedback.' };
   }
   return undefined;
 }

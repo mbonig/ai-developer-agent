@@ -38,6 +38,10 @@ export function handleMcp(msg: Rpc, env: McpEnv): Record<string, unknown> | unde
     case 'tools/call': {
       const name = String(msg.params?.name ?? ''); const input = (msg.params?.arguments ?? {}) as Record<string, unknown>;
       if (!mcpTools(env.phase).some((t) => t.name === name)) return reply({ isError: true, content: [{ type: 'text', text: `unknown tool ${name}` }] });
+      // A resumed session remembers the other phase's schema, so the model can call finish with the wrong fields. Reject so it corrects itself.
+      const required = ((mcpTools(env.phase).find((t) => t.name === name)?.inputSchema as { required?: string[] }).required) ?? [];
+      const missing = required.filter((k) => typeof input[k] !== 'string' || !(input[k] as string).trim());
+      if (missing.length) return reply({ isError: true, content: [{ type: 'text', text: `Not recorded. ${name} requires: ${required.join(', ')}. Missing: ${missing.join(', ')}. Call it again with those fields.` }] });
       if (existsSync(env.outcomeFile)) return reply({ content: [{ type: 'text', text: 'An outcome was already recorded. Stop now.' }] });
       writeFileSync(env.outcomeFile, JSON.stringify({ tool: name, input }));
       return reply({ content: [{ type: 'text', text: 'Recorded. Stop now: the harness will publish your work and wait for the humans.' }] });
