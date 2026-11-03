@@ -6,6 +6,7 @@ import type { RunAs } from './sandbox.ts';
 /** What the stream-json output of `claude -p --verbose` told us, folded as it arrives. */
 export interface StreamState {
   sessionId?: string;
+  permissionMode?: string;
   /** Latest usage per assistant message id, so repeated events for one message are not counted twice. */
   perMessage: Map<string, Usage>;
   rateLimit?: { status: string; resetsAt?: number };
@@ -33,6 +34,9 @@ export function feed(s: StreamState, line: string): void {
       const id = e.message?.id; if (typeof id === 'string' && e.message?.usage) s.perMessage.set(id, toUsage(e.message.usage));
       break;
     }
+    case 'system':
+      if (e.subtype === 'init' && typeof e.permissionMode === 'string') s.permissionMode = e.permissionMode;
+      break;
     case 'rate_limit_event': {
       const i = e.rate_limit_info;
       if (i && typeof i.status === 'string') s.rateLimit = { status: i.status, resetsAt: typeof i.resetsAt === 'number' ? i.resetsAt : undefined };
@@ -89,7 +93,7 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
   const args = [
     '-p', a.prompt, '--output-format', 'stream-json', '--verbose',
     // The MicroVM is the sandbox and this runs as a non-root user, so Claude Code's own permission prompts add nothing.
-    '--dangerously-skip-permissions',
+    '--dangerously-skip-permissions', '--permission-mode', 'bypassPermissions',
     '--mcp-config', a.mcpConfigPath, '--strict-mcp-config',
     '--append-system-prompt', a.systemPrompt,
     ...(a.resume ? ['--resume', a.sessionId] : ['--session-id', a.sessionId]),
@@ -167,6 +171,7 @@ export async function runClaudeSession(a: ClaudeRunArgs): Promise<ClaudeSessionR
     if (run.budgetKilled) return done({ type: 'budget_exhausted', summaryMarkdown: 'I reached my token budget for this issue. My work so far is saved on the branch.' });
     const wait = rateLimitedFor(s);
     if (wait !== undefined) return done({ type: 'rate_limited', retryAfterSeconds: wait });
+    if (s.permissionMode && s.permissionMode !== 'bypassPermissions') throw new Error(`Claude Code started in permission mode "${s.permissionMode}", not bypassPermissions, so its tools would be denied. Something (managed settings or the account) is overriding the bypass flag.`);
     if (!s.result) throw new Error(`Claude Code ended without a result (exit ${run.exitCode}): ${run.stderr.slice(-300)}`);
     if (s.result.subtype === 'error_max_turns' || s.result.terminalReason === 'max_turns') return done({ type: 'continue' });
     if (s.result.isError && isAuthFailure(s.result)) throw new ClaudeAuthError(`Claude Code could not authenticate. The subscription token is missing, invalid or expired. Run \`claude setup-token\` and store the new token in the ai-developer-agent/claude-code-oauth-token secret. Detail: ${s.result.text.slice(0, 200)}`);
