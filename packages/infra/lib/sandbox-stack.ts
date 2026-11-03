@@ -53,6 +53,7 @@ export class SandboxStack extends Stack {
     state.transcriptBucket.grantReadWrite(this.segmentRole);
     state.tokenVendor.grantInvoke(this.segmentRole);
     state.swampKeySecret.grantRead(this.segmentRole);
+    state.claudeTokenSecret.grantRead(this.segmentRole);
     this.segmentRole.addToPolicy(new iam.PolicyStatement({
       actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
       resources: [
@@ -80,6 +81,8 @@ export class SandboxStack extends Stack {
         { key: 'BEDROCK_MODEL_ID', value: cfg.bedrockModelId },
         { key: 'MAX_TOKENS_PER_ISSUE', value: cfg.maxTokensPerIssue },
         { key: 'AGENT_REGION', value: this.region },
+        { key: 'AGENT_BACKEND', value: cfg.agentBackend },
+        { key: 'CLAUDE_CODE_TOKEN_SECRET_ARN', value: state.claudeTokenSecret.secretArn },
         { key: 'ENABLE_FACTORY', value: cfg.enableFactory },
         { key: 'SWAMP_API_KEY_SECRET_ARN', value: state.swampKeySecret.secretArn },
       ],

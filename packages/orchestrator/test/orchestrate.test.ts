@@ -21,7 +21,7 @@ type Reply = () => Promise<object | 'timeout'>;
 
 function harness(segments: Seg[], replies: Reply[], opts: { noCommits?: boolean } = {}) {
   const log = { steps: [] as string[], waits: [] as string[], jobs: [] as SegmentJob[], launched: 0, terminated: [] as string[],
-    comments: [] as string[], prs: [] as string[], selfWakes: [] as string[], cost: [] as string[] };
+    comments: [] as string[], started: [] as string[], prs: [] as string[], selfWakes: [] as string[], cost: [] as string[] };
   let lastJob: SegmentJob | undefined;
   const ctx = {
     step: async (name: string, fn: () => unknown) => { log.steps.push(name); return fn(); },
@@ -40,7 +40,7 @@ function harness(segments: Seg[], replies: Reply[], opts: { noCommits?: boolean 
     },
   } as unknown as Ctx;
   const github: GithubApi = {
-    async postComment(a) { const m = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(m + '|'))) return false; log.comments.push(`${m}|${a.body}`); return true; },
+    async postComment(a) { if (a.marker.includes(':start:')) { log.started.push(`${a.number}|${a.body}`); return true; } const m = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(m + '|'))) return false; log.comments.push(`${m}|${a.body}`); return true; },
     async upsertPrSection(a) { log.cost.push(`${a.number}|${a.markdown}`); },
     async openPr(a) { if (opts.noCommits) return undefined; log.prs.push(`${a.head}|${a.title}|${a.body}|${a.draft}`); return 77; },
   };
@@ -285,4 +285,132 @@ test('replaceSection replaces the marked block in place, appends when absent, an
   await gh.upsertPrSection(a); await gh.upsertPrSection(a);                // second call: nothing changed
   await gh.upsertPrSection({ ...a, markdown: section('v2') });
   assert.equal(patches.length, 2); assert.ok(body.startsWith('Description') && body.includes('Closes #1') && body.includes('v2') && !body.includes('v1'));
+});
+
+test('a turn-limit session starts the next one immediately, and after too many in a row the agent stops to tell people', async () => {
+  const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a', costUsd: 0.1, usage: U(1, 2, 3, 4) });
+  const a = await fresh();
+  const h1 = harness([cont, cont, () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
+    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.equal(h1.log.launched, 3); assert.equal(h1.log.selfWakes.length, 0);
+  assert.deepEqual(h1.log.waits, []);                              // never waited for a person between the continued sessions
+  assert.equal(h1.log.comments.length, 1); assert.match(h1.log.comments[0], /Which\?/);   // no comment per continued session
+  assert.deepEqual(h1.log.jobs.map((j) => j.segmentSeq), [1, 2, 3]);
+
+  const b = await fresh();
+  const h2 = harness(Array.from({ length: 7 }, () => cont),
+    [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.equal(h2.log.launched, 7);
+  assert.ok(h2.log.comments.some((c) => c.includes('7 sessions in a row')));                 // then it waits for a reply
+  assert.equal((await getMeta(store, b.key))!.status, 'CLOSED');
+});
+
+test('github client: finishing over an existing draft PR updates it and marks it ready; a normal PR is left alone', async () => {
+  const calls: string[] = []; let drafts = true;
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    const path = url.replace('https://api.github.com', ''); calls.push(`${init.method} ${path.split('?')[0]}`);
+    const j = (o: unknown) => new Response(JSON.stringify(o));
+    if (path.startsWith('/graphql')) return j({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
+    if (init.method === 'GET' && path.includes('/pulls')) return j([{ number: 71, draft: drafts, node_id: 'PR_node' }]);
+    return j({});
+  }) as unknown as typeof fetch;
+  const gh = createGithubApi(async () => 't', fetchImpl);
+  const a = { installationId: 1, owner: 'o', repo: 'r', head: 'factory/gh-70', title: 'Real title', body: 'Real body', draft: false };
+  assert.equal(await gh.openPr(a), 71);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('GET')), ['PATCH /repos/o/r/pulls/71', 'POST /graphql']);
+  calls.length = 0; drafts = false;
+  assert.equal(await gh.openPr(a), 71);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('GET')), []);
+});
+
+test('a usage limit waits for the reset with a durable wait and then carries on; after too many it pauses for a human', async () => {
+  const limited = (s: number) => () => ({ type: 'rate_limited', retryAfterSeconds: s, tokensUsed: 0, headSha: 'a' });
+  const a = await fresh();
+  const h1 = harness([limited(900), () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
+    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.deepEqual(h1.log.waits, ['limit-wait-1']);                                   // one wait, no human involved
+  assert.equal(h1.log.launched, 2); assert.equal(h1.log.selfWakes.length, 0);
+  assert.equal(h1.log.comments.filter((c) => c.includes('usage limit')).length, 1);   // said once, when it began
+  assert.match(h1.log.comments.find((c) => c.includes('usage limit'))!, /about 15 minutes/);
+
+  const b = await fresh();
+  const h2 = harness(Array.from({ length: 9 }, () => limited(600)), [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.equal(h2.log.waits.length, 8); assert.equal(h2.log.launched, 9);              // eight waits, then it stops asking the limit to clear
+  assert.ok(h2.log.comments.some((c) => c.includes('keep hitting my Claude usage limit')));
+});
+
+test('a very long limit wait is capped, and a limit wait never runs below a minute', async () => {
+  const mk = (s: number) => () => ({ type: 'rate_limited', retryAfterSeconds: s, tokensUsed: 0, headSha: 'a' });
+  const waitSecs: number[] = [];
+  for (const [asked, expected] of [[999_999, 6 * 3600], [5, 60]] as const) {
+    const { key } = await fresh();
+    const h = harness([mk(asked), () => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'b' })], [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    const orig = (h.ctx as unknown as { wait: (n: string, d: { seconds: number }) => Promise<void> }).wait;
+    (h.ctx as unknown as { wait: unknown }).wait = async (n: string, d: { seconds: number }) => { waitSecs.push(d.seconds); return orig(n, d); };
+    await orchestrate(h.ctx, { issueKey: key }, h.deps);
+    assert.equal(waitSecs.at(-1), expected);
+  }
+});
+
+test('the PR cost section shows subscription sessions as included, with the API-equivalent value, and never as billed money', () => {
+  const only = renderCostSection([
+    { seq: 1, phase: 'IMPLEMENT', outcome: 'questions', billing: 'subscription', costUsd: 1.1, usage: U(1, 2, 3, 4) },
+    { seq: 2, phase: 'IMPLEMENT', outcome: 'rate_limited', billing: 'subscription', costUsd: 0.4, usage: U(1, 2, 3, 4) },
+    { seq: 3, phase: 'REVIEW', outcome: 'revised', billing: 'subscription', costUsd: 2.0, usage: U(1, 2, 3, 4) },
+  ], 'claude-code');
+  assert.match(only, /Included in your Claude subscription/); assert.match(only, /about \$3\.50/);
+  assert.match(only, /\| 1 \| Implementation: asked questions \| included in the subscription \(API-equivalent \$1\.10\) \|/);
+  assert.match(only, /hit the Claude usage limit and waited/); assert.match(only, /no per-token billing/);
+  assert.doesNotMatch(only, /Amazon Bedrock model usage/); assert.match(only, /\| \| \*\*Total\*\* \| \*\*included \(API-equivalent \$3\.50\)\*\* \|/);
+
+  const mixed = renderCostSection([
+    { seq: 1, phase: 'IMPLEMENT', outcome: 'questions', costUsd: 2.0, usage: U(1, 2, 3, 4) },
+    { seq: 2, phase: 'IMPLEMENT', outcome: 'done', billing: 'subscription', costUsd: 5.0, usage: U(1, 2, 3, 4) },
+  ], 'us.anthropic.claude-sonnet-5');
+  assert.match(mixed, /\*\*\$2\.00\*\* in total across 1 session: estimated Amazon Bedrock/);   // only the Bedrock session is money
+  assert.match(mixed, /A further 1 session was included in a Claude subscription \(API-equivalent about \$5\.00, not billed per token\)/);
+});
+
+test('billing is recorded per session, so the PR section can tell the backends apart', async () => {
+  const { key } = await fresh();
+  const { ctx, deps, log } = harness(
+    [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a', costUsd: 1.25, billing: 'subscription', usage: U(1, 2, 3, 4) })],
+    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+  await orchestrate(ctx, { issueKey: key }, deps);
+  assert.match(log.cost.at(-1)!, /included in the subscription \(API-equivalent \$1\.25\)/);
+});
+
+test('a run says it has started: once per run, on the issue the first time and as a resume afterwards, and never blocks the work', async () => {
+  const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a' });
+  const cancel = (key: string) => async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; };
+
+  // a brand new issue: one comment on the issue, even though the run goes through several continued sessions
+  const a = await fresh(); const num = Number(a.key.split('#').pop());
+  const h1 = harness([cont, cont, () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })], [cancel(a.key)]);
+  await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
+  assert.equal(h1.log.started.length, 1);
+  assert.match(h1.log.started[0], new RegExp(`^${num}\\\\|I have started working on this`)); assert.match(h1.log.started[0], /20 to 45 minutes/);
+  assert.equal(h1.log.comments.length, 1);                                      // only the questions: the started comment is separate
+
+  // a run that already did sessions (restart or resume after expiry) says it is picking the work back up, on the PR when there is one
+  const b = await fresh(); await setStatus(b.key, { segmentSeq: 3, prNumber: 55 });
+  const h2 = harness([() => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'c' })], [cancel(b.key)]);
+  await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
+  assert.match(h2.log.started[0], /^55\|I am picking this back up/);
+
+  // the comment is keyed by where the run starts, so a replay of the same start does not repeat it
+  assert.equal(new Set([h1.log.started[0]]).size, 1);
+
+  // if posting it fails, the work still runs
+  const c = await fresh();
+  const h3 = harness([() => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'd' })], [cancel(c.key)]);
+  const real = h3.deps.github.postComment;
+  h3.deps.github.postComment = async (x) => { if (x.marker.includes(':start:')) throw new Error('GitHub is down'); return real(x); };
+  const logged: string[] = []; h3.deps.log = (m) => { logged.push(m); };
+  await orchestrate(h3.ctx, { issueKey: c.key }, h3.deps);
+  assert.equal(h3.log.launched, 1); assert.ok(logged.includes('started comment failed'));
 });

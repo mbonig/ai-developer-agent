@@ -276,17 +276,19 @@ export async function listReferencedMicrovms(s: Store): Promise<Set<string>> {
 }
 
 /**
- * Relabeling an issue whose run FAILED or was CLOSED starts it again (no active run). DONE and BUDGET_EXHAUSTED stay final.
+ * Relabeling an issue whose run FAILED or was CLOSED starts it again (no active run). DONE stays final. BUDGET_EXHAUSTED restarts only while tokens remain under the cap.
  * Returns true for the single winner. Inbox, branch, PR link and transcript are kept so the new run resumes the work.
  */
-export async function restartTerminal(s: Store, pk: string): Promise<boolean> {
+export async function restartTerminal(s: Store, pk: string, opts: { maxTokens?: number } = {}): Promise<boolean> {
+  const exhaustedOk = opts.maxTokens !== undefined && opts.maxTokens > 0;
   try {
     await s.doc.send(new UpdateCommand({
       TableName: s.table, Key: { PK: pk, SK: 'META' },
       UpdateExpression: 'SET #status = :s, updatedAt = :u REMOVE cancelRequested, closeReason, callbackId, microvmId, segmentCallbackId',
-      ConditionExpression: '#status IN (:f, :c)',
+      // BUDGET_EXHAUSTED is restartable only while token budget remains (it also covers runs that stopped for other reasons).
+      ConditionExpression: exhaustedOk ? '#status IN (:f, :c) OR (#status = :b AND tokensUsed < :cap)' : '#status IN (:f, :c)',
       ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':s': 'STARTING', ':f': 'FAILED', ':c': 'CLOSED', ':u': now() },
+      ExpressionAttributeValues: { ':s': 'STARTING', ':f': 'FAILED', ':c': 'CLOSED', ':u': now(), ...(exhaustedOk ? { ':b': 'BUDGET_EXHAUSTED', ':cap': opts.maxTokens } : {}) },
     }));
     return true;
   } catch (e) { if (isCondFail(e)) return false; throw e; }
@@ -301,12 +303,14 @@ export async function setBranch(s: Store, pk: string, branch: string): Promise<v
 
 export interface SessionCost {
   seq: number; phase: string; outcome: string; costUsd?: number;
+  /** 'subscription' when the session ran on a Claude subscription (costUsd is then an API-equivalent value). */
+  billing?: string;
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 /** One item per session, keyed by segment number, so a replay overwrites rather than double counts. */
 export async function recordSessionCost(s: Store, pk: string, c: SessionCost): Promise<void> {
-  await s.doc.send(new PutCommand({ TableName: s.table, Item: { PK: pk, SK: `COST#${String(c.seq).padStart(10, '0')}`, ...c, ...(c.costUsd === undefined ? {} : { costUsd: c.costUsd }), recordedAt: now() } }));
+  await s.doc.send(new PutCommand({ TableName: s.table, Item: { PK: pk, SK: `COST#${String(c.seq).padStart(10, '0')}`, ...c, ...(c.costUsd === undefined ? {} : { costUsd: c.costUsd }), ...(c.billing ? { billing: c.billing } : {}), recordedAt: now() } }));
 }
 
 export async function listSessionCosts(s: Store, pk: string): Promise<SessionCost[]> {

@@ -8,6 +8,7 @@ It runs on AWS and is built around one constraint: **the agent waits for humans 
 - [Architecture](#architecture)
 - [The life of an issue](#the-life-of-an-issue)
 - [How the agent does the work](#how-the-agent-does-the-work)
+- [Choosing the model backend](#choosing-the-model-backend)
 - [Security model](#security-model)
 - [Cost and limits](#cost-and-limits)
 - [Repository layout](#repository-layout)
@@ -22,7 +23,7 @@ It runs on AWS and is built around one constraint: **the agent waits for humans 
 1. A GitHub App is installed on your repositories. It sends webhooks for issues, comments, pull requests and reviews.
 2. Applying the `agent` label to an issue starts a run. Only the label starts one, and applying a label already needs triage permission.
 3. A **durable orchestrator** (a Lambda durable function) owns the run. It launches short-lived **work segments**, one at a time, and waits for people in between.
-4. Each segment runs in a disposable **Lambda MicroVM**. It clones the repository, runs a Claude tool-use loop on Amazon Bedrock, commits and pushes, and reports back. Then the VM is terminated.
+4. Each segment runs in a disposable **Lambda MicroVM**. It clones the repository, runs Claude (through Amazon Bedrock, or through Claude Code on a Claude subscription: you [choose](#choosing-the-model-backend)), commits and pushes, and reports back. Then the VM is terminated.
 5. Comments from authorized people (owners, members and collaborators) wake the orchestrator, which starts another segment with the new comments.
 6. The run ends when the pull request is merged (done) or closed.
 
@@ -96,6 +97,7 @@ sequenceDiagram
     H->>GH: Label issue "agent"
     GH->>IN: issues.labeled webhook
     IN->>OR: start execution (one per issue)
+    OR->>GH: comment "I have started working on this"
     OR->>VM: launch VM, POST the job
     VM->>GH: clone repository (scoped token)
     loop tool-use loop
@@ -234,6 +236,64 @@ flowchart LR
 - An approval only counts if an authorized commenter says it in a comment the agent was shown. Words in the issue body, in files, or in the agent's own earlier messages never count. The agent never approves a gate on its own.
 
 Factory mode needs a swamp-club.com collective token (see [Setup](#setup-and-deployment)). Without one, repositories with a factory fall back to OpenSpec mode.
+
+## Choosing the model backend
+
+The part that does the thinking is replaceable. Everything else (webhooks, the orchestrator, the sandbox, work modes, the pull request flow, the cost section) is the same for both backends.
+
+```mermaid
+flowchart LR
+    SEG[Work segment<br/>harness: clone, commit, publish, report] --> B{agentBackend}
+    B -->|"bedrock (default)"| BR["Our tool loop<br/>Claude on Amazon Bedrock<br/>own caching and compaction<br/>billed per token"]
+    B -->|claude-code| CC["Claude Code, headless<br/>(claude -p) as the agent user<br/>own context management and subagents<br/>included in a Claude subscription"]
+    CC -. "ask_questions / finish<br/>through an MCP server" .-> SEG
+```
+
+| | `bedrock` (default) | `claude-code` |
+|---|---|---|
+| Who runs the agent loop | This project's loop over the Bedrock Converse API | Claude Code (`claude -p`) |
+| Who pays | AWS, per token | Your Claude subscription, within its usage windows |
+| Context and compaction | Our own prompt caching and transcript compaction | Claude Code's own, with sessions resumed across segments |
+| Subagents and reviewers | The `run_subagent` tool | Claude Code's own subagent tool |
+| Repo skills and `CLAUDE.md` | Read by the agent when told to | Loaded natively |
+| When a limit is hit | Per-issue token budget, turn limit | Same budget and turn limit, plus the subscription's 5-hour and weekly windows: the run waits for the reset |
+| PR cost section | Dollars per session | "Included in the subscription", with the API-equivalent value shown for scale |
+
+### Switching to Claude Code
+
+1. **Get a token** on a machine where you are signed in to Claude Code with your subscription: run `claude setup-token` and copy the long-lived token it prints.
+2. **Store it** in the secret the stack created. It holds the placeholder `UNSET` until you do:
+   ```bash
+   aws secretsmanager put-secret-value --secret-id ai-developer-agent/claude-code-oauth-token \
+     --secret-string 'THE-TOKEN'
+   ```
+3. **Switch and redeploy** the sandbox stack (the setting is baked into the image):
+   ```bash
+   cd packages/infra
+   npx cdk deploy AgentSandbox --exclusively -c agentBackend=claude-code
+   ```
+   To make it permanent, set `"agentBackend": "claude-code"` in `packages/infra/cdk.json`.
+4. **Switch back** the same way with `-c agentBackend=bedrock`.
+
+If `claude-code` is selected and the token is still `UNSET`, segments fail with a message saying so. They never fall back to Bedrock, because that would spend money you chose not to spend.
+
+Redeploying while a run is active has the same caveat as any redeploy: see [Operating it](#operating-it).
+
+### How the Claude Code backend works
+
+- **Same sandbox.** `claude -p` runs as the unprivileged agent user, in the same VM, with the same isolation: no AWS credentials in its environment, the metadata service blocked, and the whole process group killed on timeout. `--dangerously-skip-permissions` is used because the VM is the sandbox and the process is not root.
+- **Outcomes through MCP.** The harness gives Claude Code a small MCP server with two tools, `ask_questions` and `finish`. When Claude Code calls one, the harness turns it into the same outcome the Bedrock loop produces: questions, a pull request, or a review summary. If Claude Code stops without calling either, the harness resumes it once and asks it to.
+- **Sessions survive disposable VMs.** The working directory is a fixed path, Claude Code's config directory is saved to S3 after each segment and restored before the next, and later segments use `--resume` for the same session.
+- **Limits become outcomes.** Claude Code's turn limit becomes `continue` (the next session carries on). A usage window that is used up becomes `rate_limited`: the orchestrator posts a note, waits until the reset time with a durable wait (no compute), and carries on. After eight waits in a row it stops and asks you.
+- **Prompts.** The same work-mode prompts apply, with the tool names adjusted. Claude Code also loads the repository's own `CLAUDE.md`, skills and commands.
+
+### Things to weigh before switching
+
+- **It is a different agent.** Claude Code has its own tools and behavior, so results will not match the Bedrock backend run for run.
+- **Subscription limits.** A long factory run can span several 5-hour windows. The run waits, so it will be slower, not stuck.
+- **Terms of use.** Using a subscription token for automated, server-side runs is your decision under Anthropic's terms. Check them for your plan.
+- **The token is a credential for your Claude account.** It is read by the harness, given to Claude Code in its environment, and Claude Code is asked to keep it out of the commands it runs (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`). That setting has not been verified against a real run. Until it is, assume the agent could read the token, and use a subscription you are comfortable exposing to the repositories it works on.
+- **Not yet observed end to end.** The runner is tested against the real event format and a stand-in `claude`, and the CLI and MCP server are verified inside a real VM. A full run on a real subscription, including cross-VM resume, still needs to be watched.
 
 ## Security model
 
@@ -377,6 +437,8 @@ aws secretsmanager put-secret-value --secret-id ai-developer-agent/swamp-api-key
 
 The factory token is readable by the agent's commands, because the agent runs swamp. Use a narrowly scoped token.
 
+A third secret, `ai-developer-agent/claude-code-oauth-token`, is only used if you [switch to the Claude Code backend](#choosing-the-model-backend).
+
 ### 5. Try it
 
 Install the App on a test repository, create the label `agent`, open an issue, and apply the label. The agent comments with questions, a proposal, or a pull request.
@@ -391,7 +453,8 @@ Set these as CDK context in `packages/infra/cdk.json` or with `-c key=value`.
 | `githubOrg` | `mbonig` | The only owner whose events are processed |
 | `githubAppId` | none | The GitHub App ID. **Pass it on every deploy of the state stack, or it resets.** |
 | `agentLabel` | `agent` | The label that starts a run |
-| `bedrockModelId` | `us.anthropic.claude-sonnet-5` | Model or inference profile ID |
+| `agentBackend` | `bedrock` | `bedrock` or `claude-code`. See [Choosing the model backend](#choosing-the-model-backend). Redeploy to change it. |
+| `bedrockModelId` | `us.anthropic.claude-sonnet-5` | Model or inference profile ID (Bedrock backend) |
 | `maxTokensPerIssue` | `12000000` | Per-issue token budget |
 | `enableFactory` | `true` | Allow factory mode (still needs the swamp token) |
 | `microvmMemoryMiB` | `8192` | MicroVM size. Fixed per image. |

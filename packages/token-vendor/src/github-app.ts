@@ -10,17 +10,23 @@ export function signAppJwt(appId: string, privateKeyPem: string, nowSec = Math.f
   return `${head}.${body}.${b64url(sig)}`;
 }
 
-export const TOKEN_PERMISSIONS = { contents: 'write', issues: 'write', pull_requests: 'write' } as const;
+/** The permissions every token carries. */
+export const BASE_PERMISSIONS = { contents: 'write', issues: 'write', pull_requests: 'write' } as const;
+/**
+ * Workflows is requested too, so the agent can push changes to `.github/workflows/`. GitHub refuses (422) a token request for a
+ * permission the installation has not accepted yet, so the request falls back to BASE_PERMISSIONS and everything else keeps working.
+ */
+export const TOKEN_PERMISSIONS = { ...BASE_PERMISSIONS, workflows: 'write' } as const;
 
 export interface TokenRequest { installationId: number; repo: string }
-export interface VendedToken { token: string; expiresAt: string }
+export interface VendedToken { token: string; expiresAt: string; /** The permissions GitHub actually granted this token. */ permissions?: Record<string, string> }
 
 /** Installation token scoped to exactly one repository with the minimum permissions. */
 export async function vendToken(
   req: TokenRequest, appId: string, privateKeyPem: string, fetchImpl: typeof fetch = fetch,
 ): Promise<VendedToken> {
   if (!Number.isInteger(req.installationId) || !/^[A-Za-z0-9._-]+$/.test(req.repo)) throw new Error('invalid token request');
-  const r = await fetchImpl(`https://api.github.com/app/installations/${req.installationId}/access_tokens`, {
+  const request = (permissions: Record<string, string>) => fetchImpl(`https://api.github.com/app/installations/${req.installationId}/access_tokens`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${signAppJwt(appId, privateKeyPem)}`,
@@ -28,9 +34,11 @@ export async function vendToken(
       'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'ai-developer-agent',
     },
-    body: JSON.stringify({ repositories: [req.repo], permissions: TOKEN_PERMISSIONS }),
+    body: JSON.stringify({ repositories: [req.repo], permissions }),
   });
+  let r = await request(TOKEN_PERMISSIONS);
+  if (r.status === 422) r = await request(BASE_PERMISSIONS); // the installation has not accepted the Workflows permission yet
   if (!r.ok) throw new Error(`GitHub token request failed: ${r.status}`);
-  const j = (await r.json()) as { token: string; expires_at: string };
-  return { token: j.token, expiresAt: j.expires_at };
+  const j = (await r.json()) as { token: string; expires_at: string; permissions?: Record<string, string> };
+  return { token: j.token, expiresAt: j.expires_at, ...(j.permissions ? { permissions: j.permissions } : {}) };
 }

@@ -61,13 +61,19 @@ export type SegmentOutcome =
   | { type: 'questions'; markdown: string }
   | { type: 'done'; pr: { title: string; body: string } }
   | { type: 'revised'; summaryMarkdown: string }
-  | { type: 'budget_exhausted'; summaryMarkdown: string };
+  | { type: 'budget_exhausted'; summaryMarkdown: string }
+  /** The session hit its turn limit with token budget left. The work is saved and the next session simply carries on. */
+  | { type: 'continue' }
+  /** The Claude subscription's usage window is used up. Wait this long, then carry on. */
+  | { type: 'rate_limited'; retryAfterSeconds: number };
 
 export type SegmentResult = SegmentOutcome & {
   tokensUsed: number; headSha: string;
   /** Raw token counts for the whole session (agent, reviewer subagents, compaction), and their estimated cost. */
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   costUsd?: number;
+  /** 'subscription' when the session ran on a Claude subscription: costUsd is then an API-equivalent value, not money billed per token. */
+  billing?: 'bedrock' | 'subscription';
   /** The branch the segment published, when it differs from the issue's default agent branch (factory mode). */
   branch?: string;
 };

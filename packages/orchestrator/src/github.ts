@@ -27,6 +27,16 @@ export function createGithubApi(getToken: TokenFn, fetchImpl: typeof fetch = fet
     return r.json() as Promise<any>; // eslint-disable-line @typescript-eslint/no-explicit-any
   };
 
+  const graphql = async (token: string, query: string, variables: Record<string, unknown>) => {
+    const r = await fetchImpl('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'ai-developer-agent' },
+      body: JSON.stringify({ query, variables }),
+    });
+    const j = (await r.json()) as { errors?: Array<{ message: string }> };
+    if (!r.ok || j.errors?.length) throw new Error(`GitHub GraphQL failed: ${r.status} ${j.errors?.[0]?.message ?? ''}`);
+  };
+
   return {
     async postComment({ installationId, owner, repo, number, body, marker }) {
       const token = await getToken(installationId, repo);
@@ -51,7 +61,14 @@ export function createGithubApi(getToken: TokenFn, fetchImpl: typeof fetch = fet
     async openPr({ installationId, owner, repo, head, title, body, draft }) {
       const token = await getToken(installationId, repo);
       const existing = await call(token, 'GET', `/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${head}`)}&state=all`);
-      if (existing.length > 0) return existing[0].number as number;
+      if (existing.length > 0) {
+        const found = existing[0];
+        if (found.draft && !draft) { // an earlier session stopped and left a draft: finishing makes it a real pull request
+          await call(token, 'PATCH', `/repos/${owner}/${repo}/pulls/${found.number}`, { title, body });
+          await graphql(token, 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }', { id: found.node_id });
+        }
+        return found.number as number;
+      }
       const info = await call(token, 'GET', `/repos/${owner}/${repo}`);
       const ahead = await call(token, 'GET', `/repos/${owner}/${repo}/compare/${encodeURIComponent(info.default_branch)}...${encodeURIComponent(head)}`).then((c) => c.ahead_by as number, () => 0); // missing branch counts as nothing to propose
       if (ahead === 0) return undefined;

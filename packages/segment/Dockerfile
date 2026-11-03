@@ -21,6 +21,13 @@ RUN curl -fsSL -o /tmp/swamp "https://github.com/swamp-club/swamp/releases/downl
  && rm -f /tmp/swamp /tmp/checksums.txt \
  && swamp --version
 
+# Claude Code CLI, for the optional Claude Code backend (a Claude subscription instead of Amazon Bedrock). Pinned.
+RUN npm install -g @anthropic-ai/claude-code@2.1.317 \
+ && npm cache clean --force \
+ && claude --version \
+ && mkdir -p /work && chmod 755 /work
+ENV DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1
+
 # Agent commands run as this unprivileged user; the metadata service is firewalled off for it.
 RUN useradd -m -u 1001 -s /bin/bash agent
 

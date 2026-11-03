@@ -13,7 +13,7 @@ const store: Store = { doc: DynamoDBDocumentClient.from(raw), table: 'agent' };
 const cname = `ddb-ingress-test-${process.pid}`;
 let started: string[] = []; let callbacks: Array<[string, unknown]> = [];
 const deps: Deps = {
-  store, config: { agentLabel: 'agent', githubOrg: 'mbonig' }, webhookSecret: SECRET,
+  store, config: { agentLabel: 'agent', githubOrg: 'mbonig', maxTokensPerIssue: 1000 }, webhookSecret: SECRET,
   startExecution: async (k, a) => { started.push(`${k}:${a}`); return 'arn:exec'; },
   sendCallback: async (id, p) => { callbacks.push([id, p]); }, log: () => {},
 };
@@ -102,7 +102,7 @@ test('PR review comment routes via LINK; PR merge cancels and wakes', async () =
   const m = await getMeta(store, pk); assert.equal(m?.cancelRequested, true); assert.equal(m?.closeReason, 'merged');
 });
 
-test('relabeling a FAILED issue restarts it with a new execution name; DONE and active runs are left alone', async () => {
+test('relabeling a FAILED issue restarts it with a new execution name; an exhausted run restarts only under the cap; DONE and active runs are left alone', async () => {
   const pk = issueKey('mbonig', 'app', 20);
   started = [];
   assert.equal((await send('issues', labeled(20))).status, 202);
@@ -113,6 +113,9 @@ test('relabeling a FAILED issue restarts it with a new execution name; DONE and 
   assert.equal((await getMeta(store, pk))?.status, 'STARTING');
   await setStatus(pk, 'DONE');
   assert.equal((await send('issues', labeled(20))).body, 'exists');              // merged: stays final
+  await setStatus(pk, 'BUDGET_EXHAUSTED');                                        // tokensUsed is 0, under the cap: restartable
+  assert.equal((await send('issues', labeled(20))).body, 'restarted');
   await setStatus(pk, 'BUDGET_EXHAUSTED');
-  assert.equal((await send('issues', labeled(20))).body, 'exists');
+  await store.doc.send(new UpdateCommand({ TableName: 'agent', Key: { PK: pk, SK: 'META' }, UpdateExpression: 'SET tokensUsed = :t', ExpressionAttributeValues: { ':t': 1000 } }));
+  assert.equal((await send('issues', labeled(20))).body, 'exists');              // at the cap: final
 });

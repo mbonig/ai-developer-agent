@@ -18,6 +18,7 @@ export class StateStack extends Stack {
   readonly webhookSecret: secrets.Secret;
   readonly appKeySecret: secrets.Secret;
   readonly swampKeySecret: secrets.Secret;
+  readonly claudeTokenSecret: secrets.Secret;
   readonly tokenVendor: lambda.Function;
   readonly alarmTopic?: sns.Topic;
 
@@ -48,6 +49,12 @@ export class StateStack extends Stack {
     // A swamp-club.com collective token. The swamp CLI refuses to run without one. "UNSET" means not configured: the agent then skips the factory.
     this.swampKeySecret = new secrets.Secret(this, 'SwampKeySecret', {
       secretName: 'ai-developer-agent/swamp-api-key', secretStringValue: SecretValue.unsafePlainText('UNSET'), removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    // A Claude subscription token from `claude setup-token`, used only when agentBackend is claude-code. "UNSET" means not configured:
+    // the Claude Code backend then refuses to run and does not fall back to Bedrock.
+    this.claudeTokenSecret = new secrets.Secret(this, 'ClaudeTokenSecret', {
+      secretName: 'ai-developer-agent/claude-code-oauth-token', secretStringValue: SecretValue.unsafePlainText('UNSET'), removalPolicy: RemovalPolicy.RETAIN,
     });
 
     this.tokenVendor = new lambda.Function(this, 'TokenVendor', {

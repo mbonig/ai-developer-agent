@@ -46,7 +46,7 @@ export function appendUserTurn(messages: Message[], blocks: ContentBlock[]): voi
   else messages.push({ role: 'user', content: blocks });
 }
 
-async function callWithRetry(converse: ConverseFn, input: ConverseCommandInput, sleep: (ms: number) => Promise<void>): Promise<ConverseCommandOutput> {
+export async function callWithRetry(converse: ConverseFn, input: ConverseCommandInput, sleep: (ms: number) => Promise<void>): Promise<ConverseCommandOutput> {
   for (let attempt = 1; ; attempt++) {
     try { return await converse(input); }
     catch (e) {
@@ -142,8 +142,9 @@ export async function runAgent(a: LoopArgs): Promise<LoopResult> {
   const messages = a.messages;
   let tokensUsed = 0; let nudges = 0; let usage = emptyUsage();
 
+  let hitTokenLimit = false;
   for (let turn = 0; turn < a.maxTurns; turn++) {
-    if (tokensUsed >= a.tokenBudgetRemaining) break;
+    if (tokensUsed >= a.tokenBudgetRemaining) { hitTokenLimit = true; break; }
     const res = await callWithRetry(a.converse, buildRequest(a, messages), sleep);
     tokensUsed += chargedTokens(res.usage); usage = addUsage(usage, usageOf(res.usage));
     const assistant = res.output?.message;
@@ -196,6 +197,9 @@ export async function runAgent(a: LoopArgs): Promise<LoopResult> {
       return { outcome: { type: 'revised', summaryMarkdown: String(terminal.input.summary ?? '') || 'Addressed the feedback.' }, messages, tokensUsed, usage };
     }
   }
+
+  // Out of turns but not out of budget: nothing to summarize and nobody to ask. The next session continues from the saved transcript.
+  if (!hitTokenLimit) return { outcome: { type: 'continue' }, messages, tokensUsed, usage };
 
   const s = await summarize(a, messages, sleep);
   return { outcome: { type: 'budget_exhausted', summaryMarkdown: s.text }, messages, tokensUsed: tokensUsed + s.tokens, usage: addUsage(usage, s.usage) };

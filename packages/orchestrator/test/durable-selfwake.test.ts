@@ -29,9 +29,9 @@ before(async () => {
 after(async () => { await LocalDurableTestRunner.teardownTestEnvironment(); spawnSync('docker', ['rm', '-f', cname]); raw.destroy(); });
 
 function build(runnerRef: { r?: LocalDurableTestRunner }) {
-  const log = { comments: [] as string[], prs: [] as string[], launched: 0, terminated: [] as string[], selfWakes: 0 };
+  const log = { comments: [] as string[], started: [] as string[], prs: [] as string[], launched: 0, terminated: [] as string[], selfWakes: 0 };
   const github: GithubApi = {
-    async postComment(a) { const k = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(k + '|'))) return false; log.comments.push(`${k}|${a.body}`); return true; },
+    async postComment(a) { if (a.marker.includes(':start:')) { log.started.push(`${a.number}|${a.body}`); return true; } const k = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(k + '|'))) return false; log.comments.push(`${k}|${a.body}`); return true; },
     async upsertPrSection() { /* cost section: covered in orchestrate.test.ts */ },
     async openPr(a) { if (!log.prs.includes(a.head)) log.prs.push(a.head); return 42; },
   };

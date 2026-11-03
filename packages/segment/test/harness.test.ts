@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { ConverseCommandOutput, Message } from '@aws-sdk/client-bedrock-runtime';
 import type { SegmentJob, SegmentResult } from '@agent/shared';
-import { runSegment, type HarnessDeps } from '../src/harness.ts';
+import { runSegment, sessionIdFor, type HarnessDeps } from '../src/harness.ts';
 import { createSegmentServer } from '../src/server.ts';
 
 const sh = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8' });
@@ -246,4 +246,74 @@ test('each session reports raw token usage and a priced cost; unknown models rep
   const unpriced = deps(remote().bare, [() => reply([use('1', 'finish', { title: 'T', body: 'B' })])]);
   await runSegment(unpriced.d, job());
   assert.equal(unpriced.ok[0].costUsd, undefined); assert.equal(unpriced.ok[0].usage?.input, 100);
+});
+
+// ---- Claude Code backend
+import { chmodSync } from 'node:fs';
+const FAKE_CLAUDE = join(import.meta.dirname, 'fixtures/fake-claude.mjs');
+
+/** A `claude` stand-in with a fixed scenario, since the harness does not pass arbitrary environment to it. */
+function fakeClaude(scenario: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'fc-')); const bin = join(dir, 'claude'); const record = join(dir, 'record.jsonl');
+  writeFileSync(bin, `#!/bin/sh\nFAKE_SCENARIO=${scenario} FAKE_RECORD=${record} exec ${process.execPath} ${FAKE_CLAUDE} "$@"\n`); chmodSync(bin, 0o755);
+  return { bin, runs: () => readFileSync(record, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) };
+}
+
+function ccDeps(bare: string, fc: { bin: string }, over: Partial<HarnessDeps> = {}) {
+  const h = deps(bare, [], { agentBackend: 'claude-code', getClaudeToken: async () => 'sk-ant-oat-test', claudeBin: fc.bin, workBase: mkdtempSync(join(tmpdir(), 'wb-')),
+    mcpCommand: { command: 'node', args: ['unused.js'] }, ...over });
+  return h;
+}
+
+test('Claude Code backend: runs in a fixed directory, publishes the branch, saves the session, reports subscription billing and API-equivalent cost', async () => {
+  const { bare, root } = remote(); const fc = fakeClaude('finish'); let saved: Buffer | undefined;
+  const h = ccDeps(bare, fc, { saveClaudeSession: async (_j, b) => { saved = b; } });
+  await runSegment(h.d, job());
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  const r = h.ok[0];
+  assert.equal(r.type, 'done'); assert.equal(r.billing, 'subscription'); assert.equal(r.costUsd, 0.42);
+  assert.deepEqual(r.usage, { input: 100, output: 300, cacheRead: 50000, cacheWrite: 2000 }); assert.equal(r.tokensUsed, 7400);
+  assert.equal(h.prompts.length, 0, 'Bedrock is never called');
+  const check = join(root, 'check'); execFileSync('git', ['clone', '-q', '-b', 'agent/issue-7', bare, check]);
+  assert.equal(readFileSync(join(check, 'feature.txt'), 'utf8'), 'built by the fake\n');           // the harness committed what the agent wrote
+  const [run] = fc.runs();
+  assert.equal(run.args[run.args.indexOf('--session-id') + 1], sessionIdFor('ISSUE#o/r#7'));
+  assert.match(run.cwd, /\/job\/repo$/); assert.match(run.args[1], /Add greeting/);                // first prompt carries the issue
+  assert.ok(saved && saved.length > 50, 'the Claude config directory was saved');
+  assert.equal(h.store.size, 0, 'no Bedrock transcript is written');
+});
+
+test('Claude Code backend: the next segment restores the session, resumes it, and sees the new comments', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish'); let saved: Buffer | undefined;
+  const wb = mkdtempSync(join(tmpdir(), 'wb-'));
+  await runSegment(ccDeps(bare, fc, { workBase: wb, saveClaudeSession: async (_j, b) => { saved = b; } }).d, job());
+
+  const second = ccDeps(bare, fc, { workBase: wb, loadClaudeSession: async () => saved,
+    loadInbox: async () => [{ seq: 1, source: 'issue_comment', author: 'maintainer', body: 'Blue please', url: 'u', createdAt: 't' }] });
+  await runSegment(second.d, job({ segmentSeq: 2, phase: 'REVIEW', inbox: { fromExclusive: 0, toInclusive: 1 } }));
+  assert.equal(second.bad.length, 0, JSON.stringify(second.bad));
+  assert.equal(second.ok[0].type, 'revised');
+  const [first, resumed] = fc.runs();
+  assert.equal(first.sessionFileExisted, false); assert.equal(resumed.sessionFileExisted, true);   // the session came back from storage
+  assert.ok(resumed.args.includes('--resume') && !resumed.args.includes('--session-id'));
+  assert.equal(resumed.args[resumed.args.indexOf('--resume') + 1], sessionIdFor('ISSUE#o/r#7'));
+  assert.equal(resumed.cwd, first.cwd);                                                               // same path, so Claude Code finds the session
+  assert.match(resumed.args[1], /Blue please/); assert.doesNotMatch(resumed.args[1], /Add greeting/);  // a resume gets only the new activity
+});
+
+test('Claude Code backend without a token fails clearly and never falls back to Bedrock', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish');
+  const h = ccDeps(bare, fc, { getClaudeToken: async () => undefined });
+  await runSegment(h.d, job());
+  assert.equal(h.ok.length, 0); assert.equal(h.bad[0][0], 'BACKEND_NOT_CONFIGURED'); assert.match(h.bad[0][1], /claude setup-token/);
+  assert.equal(h.prompts.length, 0);
+  assert.throws(() => fc.runs(), /ENOENT/);                                                         // Claude Code was not started either
+});
+
+test('Claude Code turn limit and usage limit come back as continue and rate_limited', async () => {
+  const { bare } = remote();
+  const a = ccDeps(bare, fakeClaude('max_turns')); await runSegment(a.d, job());
+  assert.equal(a.ok[0].type, 'continue');
+  const b = ccDeps(remote().bare, fakeClaude('rate_limited')); await runSegment(b.d, job());
+  const out = b.ok[0] as { type: string; retryAfterSeconds?: number }; assert.equal(out.type, 'rate_limited'); assert.ok((out.retryAfterSeconds ?? 0) > 800);
 });
