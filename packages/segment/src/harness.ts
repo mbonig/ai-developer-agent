@@ -37,6 +37,8 @@ export interface HarnessDeps {
   getClaudeToken?(): Promise<string | undefined>;
   loadClaudeSession?(job: SegmentJob): Promise<Buffer | undefined>;
   saveClaudeSession?(job: SegmentJob, state: Buffer): Promise<void>;
+  /** Uploads the segment's own log, because stdout from inside a run does not reach CloudWatch. */
+  saveDebugLog?(job: SegmentJob, text: string): Promise<void>;
   /** Parent of the fixed working directory used by the Claude Code backend (default /work). Sessions are keyed by directory. */
   workBase?: string;
   claudeBin?: string;
@@ -64,7 +66,9 @@ const TOKEN_MAX_AGE_MS = 50 * 60 * 1000;
 /** Runs one work segment. Never throws: the outcome always goes back through the durable callback. */
 export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void> {
   const now = d.now ?? Date.now;
-  const log = d.log ?? (() => {});
+  const lines: string[] = [];
+  const base = d.log ?? (() => {});
+  const log = (msg: string, extra?: Record<string, unknown>) => { lines.push(JSON.stringify({ t: new Date().toISOString(), msg, ...extra })); base(msg, extra); };
   const backend = d.agentBackend ?? 'bedrock';
   let dir: string;
   if (backend === 'claude-code') {
@@ -217,6 +221,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     log('segment failed', { code, message: (e as Error).message });
     await d.reportFailure(job.callbackId, code, (code === 'BACKEND_NOT_CONFIGURED' ? `BACKEND_NOT_CONFIGURED: ${(e as Error).message}` : (e as Error).message).slice(0, 500)).catch((e2) => log('failure report failed', { message: String(e2) }));
   } finally {
+    if (d.saveDebugLog) await d.saveDebugLog(job, lines.join('\n')).catch(() => {});
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }

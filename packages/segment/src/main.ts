@@ -85,6 +85,9 @@ function buildDeps(): HarnessDeps {
         throw e;
       }
     },
+    async saveDebugLog(job, text) {
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: `debug/${job.owner}/${job.repo}/${job.issueNumber}/${job.segmentSeq}.log`, Body: text, ContentType: 'text/plain' }));
+    },
     async saveClaudeSession(job, state) {
       await s3.send(new PutObjectCommand({ Bucket: bucket, Key: claudeSessionKey(job), Body: state, ContentType: 'application/gzip' }));
     },
