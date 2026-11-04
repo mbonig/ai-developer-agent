@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { addUsage, emptyUsage, weightedTokens, type Phase, type SegmentOutcome, type Usage } from '@agent/shared';
 import type { RunAs } from './sandbox.ts';
 
 /** What the stream-json output of `claude -p --verbose` told us, folded as it arrives. */
 export interface StreamState {
   sessionId?: string;
+  permissionMode?: string;
   /** Latest usage per assistant message id, so repeated events for one message are not counted twice. */
   perMessage: Map<string, Usage>;
   rateLimit?: { status: string; resetsAt?: number };
@@ -33,6 +34,9 @@ export function feed(s: StreamState, line: string): void {
       const id = e.message?.id; if (typeof id === 'string' && e.message?.usage) s.perMessage.set(id, toUsage(e.message.usage));
       break;
     }
+    case 'system':
+      if (e.subtype === 'init' && typeof e.permissionMode === 'string') s.permissionMode = e.permissionMode;
+      break;
     case 'rate_limit_event': {
       const i = e.rate_limit_info;
       if (i && typeof i.status === 'string') s.rateLimit = { status: i.status, resetsAt: typeof i.resetsAt === 'number' ? i.resetsAt : undefined };
@@ -83,13 +87,34 @@ export interface ClaudeRunArgs {
 
 export interface OneRun { state: StreamState; budgetKilled: boolean; timedOut: boolean; exitCode: number | null; stderr: string }
 
+const ALLOWED_TOOLS = 'Bash,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,Task,Agent,Skill,TodoWrite,WebFetch,WebSearch,mcp__harness';
+let traced = 0;
+/** Logs the few stream events that explain a failure: the init settings and tool errors. Segment stdout does not reach CloudWatch, so the harness uploads this log to S3. */
+function traceLine(a: ClaudeRunArgs, line: string): void {
+  let e: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  try { e = JSON.parse(line); } catch { return; }
+  if (e.type === 'system' && e.subtype === 'init') a.log?.('claude init', { permissionMode: e.permissionMode, model: e.model, version: e.claude_code_version, apiKeySource: e.apiKeySource, tools: Array.isArray(e.tools) ? e.tools.length : undefined, mcp: e.mcp_servers });
+  if (e.type === 'user' && Array.isArray(e.message?.content) && traced < 15) {
+    for (const b of e.message.content) if (b?.type === 'tool_result' && b.is_error) { traced++; a.log?.('claude tool error', { text: JSON.stringify(b.content).slice(0, 300) }); }
+  }
+}
+
 /** Runs `claude -p` once. Never throws for a non-zero exit: the caller decides from the stream and the outcome file. */
 export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
   writeFileSync(a.mcpConfigPath, JSON.stringify({ mcpServers: { harness: { command: a.mcp.command, args: a.mcp.args, env: { HARNESS_OUTCOME_FILE: a.outcomeFile, HARNESS_PHASE: a.phase } } } }));
+  // Bypass mode only takes effect when consent is recorded in the user settings; a fresh config directory has none, and Claude Code then silently falls back to the default mode and denies every tool.
+  mkdirSync(a.configDir, { recursive: true });
+  const settingsFile = `${a.configDir}/settings.json`;
+  let settings: Record<string, unknown> = {};
+  try { settings = JSON.parse(readFileSync(settingsFile, 'utf8')); } catch { /* none yet */ }
+  writeFileSync(settingsFile, JSON.stringify({ ...settings, skipDangerousModePermissionPrompt: true }));
   const args = [
     '-p', a.prompt, '--output-format', 'stream-json', '--verbose',
     // The MicroVM is the sandbox and this runs as a non-root user, so Claude Code's own permission prompts add nothing.
-    '--dangerously-skip-permissions',
+    '--dangerously-skip-permissions', '--permission-mode', 'bypassPermissions',
+    // With CLAUDE_CODE_SUBPROCESS_ENV_SCRUB set, Claude Code forces the default permission mode and ignores the bypass flag, so every tool is allowed explicitly.
+    // The MicroVM is still the sandbox. `mcp__harness` allows both harness tools.
+    '--allowedTools', ALLOWED_TOOLS,
     '--mcp-config', a.mcpConfigPath, '--strict-mcp-config',
     '--append-system-prompt', a.systemPrompt,
     ...(a.resume ? ['--resume', a.sessionId] : ['--session-id', a.sessionId]),
@@ -110,7 +135,7 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
       buf += d.toString('utf8');
       let i: number;
       while ((i = buf.indexOf('\n')) !== -1) {
-        feed(state, buf.slice(0, i)); buf = buf.slice(i + 1);
+        const line = buf.slice(0, i); buf = buf.slice(i + 1); feed(state, line); traceLine(a, line);
         if (!budgetKilled && weightedTokens(streamUsage(state)) >= a.tokenBudget) { budgetKilled = true; a.log?.('token budget reached, stopping Claude Code'); kill(); }
       }
     });
@@ -119,6 +144,14 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
     p.on('error', (e) => { clearTimeout(timer); reject(e); });
     p.on('close', (code) => { clearTimeout(timer); kill(); if (buf.trim()) feed(state, buf); resolve({ state, budgetKilled, timedOut, exitCode: code, stderr }); });
   });
+}
+
+/** The subscription token was rejected. Retrying cannot help, so this maps to a non-retryable failure code. */
+export class ClaudeAuthError extends Error { code = 'BACKEND_NOT_CONFIGURED'; }
+
+export function isAuthFailure(r: { text: string; apiErrorStatus?: unknown }): boolean {
+  if (r.apiErrorStatus === 401) return true;
+  return /invalid (api key|bearer|token|authentication)|not logged in|please run \/login|authentication[_ ]error|oauth token (has )?expired|failed to authenticate|\b401\b/i.test(r.text);
 }
 
 export interface ClaudeSessionResult { outcome: SegmentOutcome; usage: Usage; costUsd?: number; sessionId: string; tokensUsed: number }
@@ -134,7 +167,7 @@ function readOutcome(file: string, phase: Phase): SegmentOutcome | undefined {
   if (rec.tool === 'ask_questions') return { type: 'questions', markdown: String(i.markdown ?? '') || '(no questions provided)' };
   if (rec.tool === 'finish') {
     if (phase === 'IMPLEMENT') return { type: 'done', pr: { title: String(i.title ?? '').trim() || 'Implement issue', body: String(i.body ?? '') } };
-    return { type: 'revised', summaryMarkdown: String(i.summary ?? '') || 'Addressed the feedback.' };
+    return { type: 'revised', summaryMarkdown: String(i.summary ?? i.body ?? '') || 'Addressed the feedback.' };
   }
   return undefined;
 }
@@ -159,8 +192,11 @@ export async function runClaudeSession(a: ClaudeRunArgs): Promise<ClaudeSessionR
     if (run.budgetKilled) return done({ type: 'budget_exhausted', summaryMarkdown: 'I reached my token budget for this issue. My work so far is saved on the branch.' });
     const wait = rateLimitedFor(s);
     if (wait !== undefined) return done({ type: 'rate_limited', retryAfterSeconds: wait });
+    if (s.permissionMode && s.permissionMode !== 'bypassPermissions') a.log?.('Claude Code is not in bypassPermissions mode; tools may be denied', { permissionMode: s.permissionMode });
+    a.log?.('claude run finished', { exitCode: run.exitCode, subtype: s.result?.subtype, isError: s.result?.isError, text: s.result?.text.slice(0, 300), stderr: run.stderr.slice(-500) });
     if (!s.result) throw new Error(`Claude Code ended without a result (exit ${run.exitCode}): ${run.stderr.slice(-300)}`);
     if (s.result.subtype === 'error_max_turns' || s.result.terminalReason === 'max_turns') return done({ type: 'continue' });
+    if (s.result.isError && isAuthFailure(s.result)) throw new ClaudeAuthError(`Claude Code could not authenticate. The subscription token is missing, invalid or expired. Run \`claude setup-token\` and store the new token in the ai-developer-agent/claude-code-oauth-token secret. Detail: ${s.result.text.slice(0, 200)}`);
     if (s.result.isError) throw new Error(`Claude Code failed (${s.result.subtype ?? 'error'}): ${s.result.text.slice(0, 300)}`);
 
     // It finished talking without a terminal tool. Resume once and ask it to call one.

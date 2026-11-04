@@ -72,3 +72,25 @@ The token comes from `claude setup-token`, is stored in Secrets Manager, read by
 
 1. Does `--resume` work across VMs when only the config directory and cwd are restored? (Expected yes. To be observed.)
 2. Does `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` fully hide the token from Bash tool calls? (To be observed.)
+
+## Findings from the first supervised run (2026-11-03, mbonig/agreemint#54, OpenSpec mode)
+
+Result: an issue ran end to end on a Claude subscription and opened a proposal pull request. Four defects had to be fixed first.
+
+1. **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` needs `bubblewrap` and `socat` in the image.** Without bubblewrap Claude Code refuses to start. Without socat its Bash sandbox fails and every command is refused.
+2. **The scrub flag forces the default permission mode.** `--dangerously-skip-permissions`, `--permission-mode bypassPermissions` and the `skipDangerousModePermissionPrompt` consent setting are all ignored. Claude Code prints "Permission mode forced to default" on stderr. The fix is an explicit `--allowedTools` list (including `mcp__harness`). The VM remains the sandbox.
+3. **Authentication errors** are now classified as `BACKEND_NOT_CONFIGURED` and are not retried. The orchestrator sees failures as `CallbackExternalError`, so the code is placed at the start of the message and matched there.
+4. **Segment stdout does not reach CloudWatch** beyond the start-up line. The harness now uploads its own log to `debug/<owner>/<repo>/<issue>/<segment>.log` in the transcripts bucket. It records the init settings, tool errors, and each run's result and stderr tail.
+
+Open questions:
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | `--resume` across VMs | Worked. Segments 6 and 7 ran in separate VMs and continued the same session. |
+| 2 | Scrub keeps the token out of Bash | Not yet checked. The flag is enforced (it needs the sandbox), but the `env` test has not been run. |
+| 3 | Derived session id accepted | Yes. |
+| 4 | Repo skills and `CLAUDE.md` | The `openspec-propose` skill loaded and ran. Factory skills not tried. |
+| 5 | Reviewer subagents | Not tried (factory mode). |
+| 6 | Token tally accuracy | Not compared yet. The PR cost section showed plausible figures. |
+
+Still open: cost of failed attempts, proactive usage-window handling, a usage-window hit, a factory-mode run.

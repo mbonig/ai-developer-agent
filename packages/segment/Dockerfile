@@ -2,7 +2,7 @@
 FROM public.ecr.aws/docker/library/node:24-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ripgrep ca-certificates bash curl python3 make g++ iproute2 \
+ && apt-get install -y --no-install-recommends git ripgrep ca-certificates bash curl python3 make g++ iproute2 bubblewrap socat \
       fontconfig fonts-dejavu-core fonts-liberation fonts-noto-core fonts-noto-color-emoji chromium \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*

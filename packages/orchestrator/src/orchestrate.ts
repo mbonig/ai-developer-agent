@@ -105,6 +105,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
       } catch (e) {
         lastError = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         d.log?.('segment attempt failed', { issueKey: key, segmentSeq, attempt, error: lastError.slice(0, 500) });
+        if (lastError.includes('BACKEND_NOT_CONFIGURED')) attempt = c.segmentMaxAttempts; // a missing or rejected token cannot be fixed by retrying
       } finally {
         // Always terminate before any retry launches.
         await ctx.step(`terminate-${iter}-${attempt}`, async () => {
