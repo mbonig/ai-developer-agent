@@ -411,6 +411,10 @@ npm run typecheck
 
 Follow [`docs/github-app.md`](docs/github-app.md). In short: create an App with Contents, Issues and Pull requests read/write, subscribe it to the five events above, and keep the App ID, private key and webhook secret.
 
+### Deploying from GitHub Actions
+
+`.github/workflows/deploy.yml` runs typecheck and tests, then `cdk deploy --all` on every push to `main` (or manually via **Run workflow**). It authenticates to AWS with OIDC: create an IAM role that trusts GitHub's OIDC provider for this repository (able to assume the CDK bootstrap roles), and save its ARN as the `AWS_DEPLOY_ROLE_ARN` secret in a `production` environment. The deploy uses the context in `packages/infra/cdk.json`, including `githubAppId`. See the note on deploying while runs are active under [Operating it](#operating-it).
+
 ### 3. Deploy
 
 ```bash

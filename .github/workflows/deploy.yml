@@ -1,0 +1,36 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; never cancel one mid-flight (CloudFormation would be left updating).
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC to AWS
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Deploy
+        working-directory: packages/infra
+        run: npx cdk deploy --all --require-approval never
