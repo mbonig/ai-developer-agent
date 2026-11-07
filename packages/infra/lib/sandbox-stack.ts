@@ -69,7 +69,7 @@ export class SandboxStack extends Stack {
       baseImageVersion: cfg.microvmBaseImageVersion,
       buildRoleArn: buildRole.roleArn,
       codeArtifact: { uri: artifact.s3ObjectUrl },
-      cpuConfigurations: [{ architecture: 'ARM_64' }],
+      cpuConfigurations: [{ architecture: 'X86_64' }],
       resources: [{ minimumMemoryInMiB: cfg.microvmMemoryMiB }],
       // NET_ADMIN is needed to firewall the metadata service from agent commands. Agent commands run as an unprivileged user.
       additionalOsCapabilities: ['ALL'],

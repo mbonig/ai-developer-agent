@@ -47,7 +47,7 @@ flowchart LR
         SWEEP["Sweeper Lambda<br/>every 15 min"]
         TV["Token vendor Lambda<br/>GitHub App tokens"]
     end
-    subgraph Sandbox["Work segment: disposable MicroVM (ARM64)"]
+    subgraph Sandbox["Work segment: disposable MicroVM (x86_64)"]
         SRV["Segment server<br/>(root harness)"]
         AGENT["Agent commands<br/>(unprivileged user)"]
     end
@@ -511,5 +511,5 @@ cd packages/infra && npx cdk synth
 - **Merge conflicts** with the default branch are not resolved automatically.
 - **Edited or deleted comments** are not acted on.
 - **Removing the label** does not cancel a run.
-- **Architecture.** Segments run on ARM64, so repositories that need x86-only binaries, Docker, or external services (databases) during builds and tests cannot be built and tested in a segment.
+- **Architecture.** Segments run on x86_64, so x86-only tooling (such as Flutter) is available. Repositories that need Docker or external services (databases) during builds and tests cannot be built and tested in a segment.
 - **One region per deployment.** A GitHub App has one webhook URL, so a second region needs a second App or a router.
