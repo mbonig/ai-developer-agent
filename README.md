@@ -373,11 +373,19 @@ For a sense of scale:
 │   ├── orchestrator/    durable orchestrator, MicroVM launcher, sweeper, cost section
 │   ├── segment/         MicroVM image: server, harness, agent loop, tools, sandbox
 │   └── infra/           AWS CDK app (four stacks)
+├── .claude/
+│   └── skills/          skills available to the agent when it works on this repository
 ├── docs/
 │   └── github-app.md    registering the GitHub App, step by step
 └── openspec/
     └── changes/initial/ the proposal, design, specs and task list this was built from
 ```
+
+### Skills
+
+Like any repository, this one can carry its own `.claude/skills/`: Claude Code loads them natively, and the Bedrock backend is told to read them for the relevant task (see [`prompts.ts`](packages/segment/src/prompts.ts)).
+
+- [`diagram-design`](.claude/skills/diagram-design) ([cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design), MIT): an editorial system for building architecture, sequence, flow, state-machine and 40-odd other diagram types as self-contained HTML/SVG, instead of ad-hoc Mermaid or ASCII art. The agent renders its output with the headless Chromium already in the sandbox before sharing it.
 
 The four stacks deploy in this order:
 
