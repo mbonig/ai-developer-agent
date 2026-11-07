@@ -33,4 +33,4 @@ jobs:
           aws-region: us-west-2
       - name: Deploy
         working-directory: packages/infra
-        run: npx cdk deploy --all --require-approval never
+        run: npx cdk deploy AgentState AgentSandbox AgentOrchestrator AgentIngress --require-approval never

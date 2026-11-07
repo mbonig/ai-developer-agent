@@ -413,7 +413,7 @@ Follow [`docs/github-app.md`](docs/github-app.md). In short: create an App with 
 
 ### Deploying from GitHub Actions
 
-`.github/workflows/deploy.yml` runs typecheck and tests, then `cdk deploy --all` on every push to `main` (or manually via **Run workflow**). It authenticates to AWS with OIDC: create an IAM role that trusts GitHub's OIDC provider for this repository (able to assume the CDK bootstrap roles), and save its ARN as the `AWS_DEPLOY_ROLE_ARN` secret in a `production` environment. The deploy uses the context in `packages/infra/cdk.json`, including `githubAppId`. See the note on deploying while runs are active under [Operating it](#operating-it).
+`.github/workflows/deploy.yml` runs typecheck and tests, then `cdk deploy` of the four stacks on every push to `main` (or manually via **Run workflow**). It authenticates to AWS with OIDC. Create the role once, by hand, with `npx cdk deploy AgentDeployRole` (add `-c githubOidcProviderArn=<arn>` if the account already has a GitHub OIDC provider). The role trusts only this repository's `production` environment and can only assume the CDK bootstrap roles. Save the `DeployRoleArn` output as the `AWS_DEPLOY_ROLE_ARN` secret in a `production` GitHub environment. The workflow deploys the four stacks explicitly and skips `AgentDeployRole`, so it never edits its own role. The deploy uses the context in `packages/infra/cdk.json`, including `githubAppId`. See the note on deploying while runs are active under [Operating it](#operating-it).
 
 ### 3. Deploy
 
