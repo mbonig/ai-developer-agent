@@ -1,1 +1,1 @@
-{"name":"@agent/infra","version":"0.0.0","private":true,"type":"module","main":"src/index.ts","dependencies":{"aws-cdk-lib":"^2.275.0","constructs":"^10.8.1"}}
+{"name":"@agent/infra","version":"0.0.0","private":true,"type":"module","main":"src/index.ts","dependencies":{"aws-cdk-lib":"^2.275.0","constructs":"^10.8.1","esbuild":"^0.28.2"}}
