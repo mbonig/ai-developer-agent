@@ -21,5 +21,4 @@ new DeployRoleStack(app, 'AgentDeployRole', {
   env,
   repo: `${app.node.tryGetContext('githubOrg') ?? 'mbonig'}/${app.node.tryGetContext('githubRepo') ?? 'ai-developer-agent'}`,
   environment: 'production',
-  existingProviderArn: app.node.tryGetContext('githubOidcProviderArn'),
 });
