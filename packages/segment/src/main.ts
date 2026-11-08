@@ -4,9 +4,10 @@ import {
   LambdaClient, InvokeCommand, SendDurableExecutionCallbackSuccessCommand, SendDurableExecutionCallbackFailureCommand,
 } from '@aws-sdk/client-lambda';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { listMessages, loadConfig, type SegmentJob } from '@agent/shared';
+import { listMessages, loadConfig, parseAgentBackend, type SegmentJob } from '@agent/shared';
 import { createSegmentServer } from './server.ts';
 import { runSegment, type HarnessDeps } from './harness.ts';
 import { lockDownMetadata, sandboxActive } from './sandbox.ts';
@@ -69,7 +70,13 @@ function buildDeps(): HarnessDeps {
       return v && v !== 'UNSET' ? v : undefined;
     },
     // Which backend runs the agent, and for Claude Code the subscription token from `claude setup-token` ("UNSET" = not configured).
-    agentBackend: config.agentBackend,
+    // Read per segment from SSM so the backend can be flipped without a redeploy. AGENT_BACKEND is the fallback when no parameter is configured.
+    async getAgentBackend() {
+      const name = process.env.AGENT_BACKEND_PARAM;
+      if (!name) return config.agentBackend;
+      const r = await new SSMClient({ region }).send(new GetParameterCommand({ Name: name }));
+      return parseAgentBackend(r.Parameter?.Value, name);
+    },
     async getClaudeToken() {
       const arn = process.env.CLAUDE_CODE_TOKEN_SECRET_ARN;
       if (!arn) return undefined;

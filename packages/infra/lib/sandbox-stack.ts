@@ -13,6 +13,8 @@ import { settings } from './props.ts';
 import type { StateStack } from './state-stack.ts';
 
 export const IMAGE_VERSION_PARAM = '/ai-developer-agent/microvm-image-version';
+/** Holds `bedrock` or `claude-code`. Segments read it on every run, so changing it needs no redeploy. */
+export const AGENT_BACKEND_PARAM = '/ai-developer-agent/agent-backend';
 
 export interface SandboxProps extends StackProps { state: StateStack }
 
@@ -54,6 +56,13 @@ export class SandboxStack extends Stack {
     state.tokenVendor.grantInvoke(this.segmentRole);
     state.swampKeySecret.grantRead(this.segmentRole);
     state.claudeTokenSecret.grantRead(this.segmentRole);
+    // The value is fixed in the template, so CloudFormation only writes it when the parameter is first created. Later changes made
+    // with `aws ssm put-parameter` are not reverted by a deploy.
+    const backendParam = new ssm.StringParameter(this, 'AgentBackend', {
+      parameterName: AGENT_BACKEND_PARAM, stringValue: 'bedrock',
+      description: 'Model backend for work segments: "bedrock" or "claude-code". Read at the start of every segment.',
+    });
+    backendParam.grantRead(this.segmentRole);
     this.segmentRole.addToPolicy(new iam.PolicyStatement({
       actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
       resources: [
@@ -81,7 +90,7 @@ export class SandboxStack extends Stack {
         { key: 'BEDROCK_MODEL_ID', value: cfg.bedrockModelId },
         { key: 'MAX_TOKENS_PER_ISSUE', value: cfg.maxTokensPerIssue },
         { key: 'AGENT_REGION', value: this.region },
-        { key: 'AGENT_BACKEND', value: cfg.agentBackend },
+        { key: 'AGENT_BACKEND_PARAM', value: AGENT_BACKEND_PARAM },
         { key: 'CLAUDE_CODE_TOKEN_SECRET_ARN', value: state.claudeTokenSecret.secretArn },
         { key: 'ENABLE_FACTORY', value: cfg.enableFactory },
         { key: 'SWAMP_API_KEY_SECRET_ARN', value: state.swampKeySecret.secretArn },

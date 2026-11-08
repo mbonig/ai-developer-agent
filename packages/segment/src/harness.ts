@@ -31,8 +31,10 @@ export interface HarnessDeps {
   getSwampKey?(): Promise<string | undefined>;
   loadFactoryState?(job: SegmentJob): Promise<Buffer | undefined>;
   saveFactoryState?(job: SegmentJob, state: Buffer): Promise<void>;
-  /** Which model backend runs the agent. Defaults to Bedrock. */
+  /** Which model backend runs the agent. Defaults to Bedrock. Used when `getAgentBackend` is not provided. */
   agentBackend?: AgentBackend;
+  /** Looks up the backend for each segment (an SSM parameter in the deployment), so it can change without a redeploy. Takes precedence over `agentBackend`. */
+  getAgentBackend?(): Promise<AgentBackend>;
   /** The Claude subscription token from `claude setup-token`. Without one the Claude Code backend cannot run. */
   getClaudeToken?(): Promise<string | undefined>;
   loadClaudeSession?(job: SegmentJob): Promise<Buffer | undefined>;
@@ -69,7 +71,17 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
   const lines: string[] = [];
   const base = d.log ?? (() => {});
   const log = (msg: string, extra?: Record<string, unknown>) => { lines.push(JSON.stringify({ t: new Date().toISOString(), msg, ...extra })); base(msg, extra); };
-  const backend = d.agentBackend ?? 'bedrock';
+  let backend: AgentBackend;
+  try {
+    backend = d.getAgentBackend ? await d.getAgentBackend() : d.agentBackend ?? 'bedrock';
+  } catch (e) {
+    // Never guess: running the wrong backend could spend money the operator chose not to.
+    log('backend lookup failed', { message: (e as Error).message });
+    await d.reportFailure(job.callbackId, 'SEGMENT_ERROR', `Could not determine the model backend: ${(e as Error).message}`.slice(0, 500)).catch((e2) => log('failure report failed', { message: String(e2) }));
+    if (d.saveDebugLog) await d.saveDebugLog(job, lines.join('\n')).catch(() => {});
+    return;
+  }
+  log('backend selected', { backend });
   let dir: string;
   if (backend === 'claude-code') {
     // Claude Code keys its sessions by working directory, so the path must be the same in every segment.

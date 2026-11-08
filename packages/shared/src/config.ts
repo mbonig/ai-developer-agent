@@ -1,5 +1,12 @@
 export type AgentBackend = 'bedrock' | 'claude-code';
 
+/** Validates a backend name from configuration. `source` names where it came from, for the error message. */
+export function parseAgentBackend(value: string | undefined, source: string): AgentBackend {
+  const v = value?.trim();
+  if (v !== 'bedrock' && v !== 'claude-code') throw new Error(`${source} must be "bedrock" or "claude-code", got "${value ?? ''}"`);
+  return v;
+}
+
 export interface Config {
   /** Which model backend runs the agent: Amazon Bedrock (default) or Claude Code on a Claude subscription. */
   agentBackend: AgentBackend;
@@ -35,8 +42,7 @@ function int(env: Env, name: string, def?: number): number {
 }
 
 export function loadConfig(env: Env = process.env): Config {
-  const backend = (env.AGENT_BACKEND || 'bedrock') as string;
-  if (backend !== 'bedrock' && backend !== 'claude-code') throw new Error(`AGENT_BACKEND must be "bedrock" or "claude-code", got "${backend}"`);
+  const backend = parseAgentBackend(env.AGENT_BACKEND || 'bedrock', 'AGENT_BACKEND');
   // The Bedrock model id is only needed by the Bedrock backend.
   const modelId = env.BEDROCK_MODEL_ID || (backend === 'claude-code' ? 'claude-code' : '');
   if (!modelId) throw new Error('Missing required config BEDROCK_MODEL_ID');

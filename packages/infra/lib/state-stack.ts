@@ -51,7 +51,7 @@ export class StateStack extends Stack {
       secretName: 'ai-developer-agent/swamp-api-key', secretStringValue: SecretValue.unsafePlainText('UNSET'), removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // A Claude subscription token from `claude setup-token`, used only when agentBackend is claude-code. "UNSET" means not configured:
+    // A Claude subscription token from `claude setup-token`, used only when the agent-backend SSM parameter is claude-code. "UNSET" means not configured:
     // the Claude Code backend then refuses to run and does not fall back to Bedrock.
     this.claudeTokenSecret = new secrets.Secret(this, 'ClaudeTokenSecret', {
       secretName: 'ai-developer-agent/claude-code-oauth-token', secretStringValue: SecretValue.unsafePlainText('UNSET'), removalPolicy: RemovalPolicy.RETAIN,
