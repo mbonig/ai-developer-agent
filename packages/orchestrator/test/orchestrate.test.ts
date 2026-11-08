@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { DynamoDBClient, CreateTableCommand } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { CallbackTimeoutError } from '@aws/durable-execution-sdk-js';
-import { createMeta, getMeta, appendMessage, wake, requestCancel, issueKey, loadConfig, type Store, type SegmentJob } from '@agent/shared';
+import { createMeta, getMeta, appendMessage, wake, requestCancel, unlinkPr, issueKey, loadConfig, type Store, type SegmentJob } from '@agent/shared';
 import { orchestrate, type Ctx, type OrchDeps } from '../src/orchestrate.ts';
 import { createGithubApi, markerComment, replaceSection, type GithubApi } from '../src/github.ts';
 import { renderCostSection } from '../src/cost.ts';
@@ -42,7 +42,7 @@ function harness(segments: Seg[], replies: Reply[], opts: { noCommits?: boolean 
   const github: GithubApi = {
     async postComment(a) { if (a.marker.includes(':start:')) { log.started.push(`${a.number}|${a.body}`); return true; } const m = `${a.number}:${a.marker}`; if (log.comments.some((c) => c.startsWith(m + '|'))) return false; log.comments.push(`${m}|${a.body}`); return true; },
     async upsertPrSection(a) { log.cost.push(`${a.number}|${a.markdown}`); },
-    async openPr(a) { if (opts.noCommits) return undefined; log.prs.push(`${a.head}|${a.title}|${a.body}|${a.draft}`); return 77; },
+    async openPr(a) { if (opts.noCommits) return undefined; log.prs.push(`${a.head}|${a.title}|${a.body}|${a.draft}`); return 76 + log.prs.length; },
   };
   const deps: OrchDeps = {
     store, config, github,
@@ -74,7 +74,7 @@ before(async () => {
 });
 after(() => { spawnSync('docker', ['rm', '-f', cname]); raw.destroy(); });
 
-test('lifecycle: questions -> answer -> PR -> review -> revised -> merged', async () => {
+test('lifecycle: questions -> answer -> PR -> review -> revised -> issue closed', async () => {
   const { key, num } = await fresh();
   const { ctx, deps, log } = harness(
     [
@@ -85,7 +85,7 @@ test('lifecycle: questions -> answer -> PR -> review -> revised -> merged', asyn
     [
       async () => { await appendMessage(store, key, msg('Postgres')); assert.ok(await wake(store, key)); return { wake: true }; },
       async () => { await appendMessage(store, key, msg('please rename')); assert.ok(await wake(store, key)); return { wake: true }; },
-      async () => { await requestCancel(store, key, 'merged'); return { cancel: true }; },
+      async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; },
     ],
   );
   const out = await orchestrate(ctx, { issueKey: key }, deps);
@@ -104,6 +104,32 @@ test('lifecycle: questions -> answer -> PR -> review -> revised -> merged', asyn
   assert.equal(log.jobs[0].tokenBudgetRemaining, 1000);
 });
 
+test('a merged PR does not end the run: a later comment starts the next PR on a fresh branch', async () => {
+  const { key, num } = await fresh();
+  const { ctx, deps, log } = harness(
+    [
+      () => ({ type: 'done', pr: { title: 'First half', body: 'PWA' }, tokensUsed: 10, headSha: 'a' }),
+      () => ({ type: 'done', pr: { title: 'Second half', body: 'Flutter' }, tokensUsed: 10, headSha: 'b' }),
+    ],
+    [
+      async () => { // the first PR is merged while the run waits: it is unlinked and the run carries on
+        assert.equal(await unlinkPr(store, key, 'mbonig', 'app', num, 77), true);
+        assert.equal((await getMeta(store, key))!.status, 'WAITING');
+        await appendMessage(store, key, msg('now the Flutter half')); assert.ok(await wake(store, key)); return { wake: true };
+      },
+      async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; },
+    ],
+  );
+  const out = await orchestrate(ctx, { issueKey: key }, deps);
+  assert.equal(out.status, 'DONE');
+  assert.deepEqual(log.jobs.map((j) => [j.phase, j.branch, j.prNumber]), [
+    ['IMPLEMENT', `agent/issue-${num}`, null], ['IMPLEMENT', `agent/issue-${num}-2`, null]]);
+  assert.match(log.prs[0], new RegExp(`^agent/issue-${num}\\|First half`));
+  assert.match(log.prs[1], new RegExp(`^agent/issue-${num}-2\\|Second half`));
+  const m = (await getMeta(store, key))!;
+  assert.equal(m.prNumber, 78); assert.equal(m.phase, 'REVIEW'); assert.equal(m.prSeq, 2);
+});
+
 test('comment during segment blocks park and self-wakes without debounce', async () => {
   const { key } = await fresh();
   const { ctx, deps, log } = harness(
@@ -113,14 +139,14 @@ test('comment during segment blocks park and self-wakes without debounce', async
     ],
     [
       async () => ({ wake: true }),                                // self-woken: status must still be RUNNING
-      async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; },
+      async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; },
     ],
   );
   // The first reply resolves via the orchestrator's own callback; check state while it "waits".
   const before = deps.sendCallback;
   deps.sendCallback = async (id, p) => { assert.equal((await getMeta(store, key))!.status, 'RUNNING'); await before(id, p); };
   const out = await orchestrate(ctx, { issueKey: key }, deps);
-  assert.equal(out.status, 'CLOSED');
+  assert.equal(out.status, 'DONE');
   assert.deepEqual(log.selfWakes, ['humancb-human-1']);
   assert.equal(log.waits.length, 0);
   assert.deepEqual(log.jobs[1].inbox, { fromExclusive: 0, toInclusive: 1 });
@@ -150,7 +176,7 @@ test('retry succeeds and consumes the same range', async () => {
   const { key } = await fresh(); await appendMessage(store, key, msg('start'));
   const { ctx, deps, log } = harness(
     [() => new Error('transient'), () => ({ type: 'questions', markdown: 'Q?', tokensUsed: 5, headSha: 'a' })],
-    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(ctx, { issueKey: key }, deps);
   assert.deepEqual(log.jobs.map((j) => j.inbox), [{ fromExclusive: 0, toInclusive: 1 }, { fromExclusive: 0, toInclusive: 1 }]);
   assert.equal((await getMeta(store, key))!.consumedSeq, 1);
@@ -186,14 +212,14 @@ test('finishing without changes posts a note instead of failing, and keeps waiti
   const { key } = await fresh();
   const { ctx, deps, log } = harness(
     [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a' })],
-    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }], { noCommits: true });
-  assert.equal((await orchestrate(ctx, { issueKey: key }, deps)).status, 'CLOSED');
+    [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }], { noCommits: true });
+  assert.equal((await orchestrate(ctx, { issueKey: key }, deps)).status, 'DONE');
   assert.ok(log.comments.some((c) => c.includes('without making any changes')));
 });
 
 test('cancel flagged while a segment runs stops before posting', async () => {
   const { key } = await fresh();
-  const { ctx, deps, log } = harness([async () => { await requestCancel(store, key, 'merged'); return { type: 'questions', markdown: 'Q?', tokensUsed: 1, headSha: 'a' }; }], []);
+  const { ctx, deps, log } = harness([async () => { await requestCancel(store, key, 'issue closed'); return { type: 'questions', markdown: 'Q?', tokensUsed: 1, headSha: 'a' }; }], []);
   assert.equal((await orchestrate(ctx, { issueKey: key }, deps)).status, 'DONE');
   assert.equal(log.comments.length, 0);
 });
@@ -228,7 +254,7 @@ test('a segment that published a different branch (factory mode) opens the PR fr
   const { key } = await fresh();
   const { ctx, deps, log } = harness(
     [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a', branch: 'factory/gh-7' })],
-    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(ctx, { issueKey: key }, deps);
   assert.match(log.prs[0], /^factory\/gh-7\|/);
   assert.equal((await getMeta(store, key))!.branch, 'factory/gh-7');
@@ -247,7 +273,7 @@ test('the PR description carries a running cost across every session, including 
     [
       async () => { await appendMessage(store, key, msg('Postgres')); await wake(store, key); return { wake: true }; },
       async () => { await appendMessage(store, key, msg('rename it')); await wake(store, key); return { wake: true }; },
-      async () => { await requestCancel(store, key, 'merged'); return { cancel: true }; },
+      async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; },
     ]);
   await orchestrate(ctx, { issueKey: key }, deps);
   // No PR existed after session 1 (nothing to update). The PR opened in session 2 already shows sessions 1 and 2. Session 3 updates it again.
@@ -291,7 +317,7 @@ test('a turn-limit session starts the next one immediately, and after too many i
   const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a', costUsd: 0.1, usage: U(1, 2, 3, 4) });
   const a = await fresh();
   const h1 = harness([cont, cont, () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
-    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, a.key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
   assert.equal(h1.log.launched, 3); assert.equal(h1.log.selfWakes.length, 0);
   assert.deepEqual(h1.log.waits, []);                              // never waited for a person between the continued sessions
@@ -300,11 +326,11 @@ test('a turn-limit session starts the next one immediately, and after too many i
 
   const b = await fresh();
   const h2 = harness(Array.from({ length: 7 }, () => cont),
-    [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, b.key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
   assert.equal(h2.log.launched, 7);
   assert.ok(h2.log.comments.some((c) => c.includes('7 sessions in a row')));                 // then it waits for a reply
-  assert.equal((await getMeta(store, b.key))!.status, 'CLOSED');
+  assert.equal((await getMeta(store, b.key))!.status, 'DONE');
 });
 
 test('github client: finishing over an existing draft PR updates it and marks it ready; a normal PR is left alone', async () => {
@@ -329,7 +355,7 @@ test('a usage limit waits for the reset with a durable wait and then carries on;
   const limited = (s: number) => () => ({ type: 'rate_limited', retryAfterSeconds: s, tokensUsed: 0, headSha: 'a' });
   const a = await fresh();
   const h1 = harness([limited(900), () => ({ type: 'questions', markdown: 'Which?', tokensUsed: 1, headSha: 'b' })],
-    [async () => { await requestCancel(store, a.key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, a.key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(h1.ctx, { issueKey: a.key }, h1.deps);
   assert.deepEqual(h1.log.waits, ['limit-wait-1']);                                   // one wait, no human involved
   assert.equal(h1.log.launched, 2); assert.equal(h1.log.selfWakes.length, 0);
@@ -337,7 +363,7 @@ test('a usage limit waits for the reset with a durable wait and then carries on;
   assert.match(h1.log.comments.find((c) => c.includes('usage limit'))!, /about 15 minutes/);
 
   const b = await fresh();
-  const h2 = harness(Array.from({ length: 9 }, () => limited(600)), [async () => { await requestCancel(store, b.key, 'closed'); return { cancel: true }; }]);
+  const h2 = harness(Array.from({ length: 9 }, () => limited(600)), [async () => { await requestCancel(store, b.key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(h2.ctx, { issueKey: b.key }, h2.deps);
   assert.equal(h2.log.waits.length, 8); assert.equal(h2.log.launched, 9);              // eight waits, then it stops asking the limit to clear
   assert.ok(h2.log.comments.some((c) => c.includes('keep hitting my Claude usage limit')));
@@ -348,7 +374,7 @@ test('a very long limit wait is capped, and a limit wait never runs below a minu
   const waitSecs: number[] = [];
   for (const [asked, expected] of [[999_999, 6 * 3600], [5, 60]] as const) {
     const { key } = await fresh();
-    const h = harness([mk(asked), () => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'b' })], [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    const h = harness([mk(asked), () => ({ type: 'questions', markdown: 'q', tokensUsed: 1, headSha: 'b' })], [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }]);
     const orig = (h.ctx as unknown as { wait: (n: string, d: { seconds: number }) => Promise<void> }).wait;
     (h.ctx as unknown as { wait: unknown }).wait = async (n: string, d: { seconds: number }) => { waitSecs.push(d.seconds); return orig(n, d); };
     await orchestrate(h.ctx, { issueKey: key }, h.deps);
@@ -379,14 +405,14 @@ test('billing is recorded per session, so the PR section can tell the backends a
   const { key } = await fresh();
   const { ctx, deps, log } = harness(
     [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a', costUsd: 1.25, billing: 'subscription', usage: U(1, 2, 3, 4) })],
-    [async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; }]);
+    [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }]);
   await orchestrate(ctx, { issueKey: key }, deps);
   assert.match(log.cost.at(-1)!, /included in the subscription \(API-equivalent \$1\.25\)/);
 });
 
 test('a run says it has started: once per run, on the issue the first time and as a resume afterwards, and never blocks the work', async () => {
   const cont = () => ({ type: 'continue', tokensUsed: 5, headSha: 'a' });
-  const cancel = (key: string) => async () => { await requestCancel(store, key, 'closed'); return { cancel: true }; };
+  const cancel = (key: string) => async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; };
 
   // a brand new issue: one comment on the issue, even though the run goes through several continued sessions
   const a = await fresh(); const num = Number(a.key.split('#').pop());

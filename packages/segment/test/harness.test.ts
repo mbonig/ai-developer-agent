@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { ConverseCommandOutput, Message } from '@aws-sdk/client-bedrock-runtime';
 import type { SegmentJob, SegmentResult } from '@agent/shared';
-import { runSegment, sessionIdFor, type HarnessDeps } from '../src/harness.ts';
+import { runSegment, sessionIdFor, factoryBranch, type HarnessDeps } from '../src/harness.ts';
 import { createSegmentServer } from '../src/server.ts';
 
 const sh = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8' });
@@ -332,4 +332,11 @@ test('Claude Code turn limit and usage limit come back as continue and rate_limi
   assert.equal(a.ok[0].type, 'continue');
   const b = ccDeps(remote().bare, fakeClaude('rate_limited')); await runSegment(b.d, job());
   const out = b.ok[0] as { type: string; retryAfterSeconds?: number }; assert.equal(out.type, 'rate_limited'); assert.ok((out.retryAfterSeconds ?? 0) > 800);
+});
+
+test('the factory branch follows the pull request number: factory/gh-<n>, then factory/gh-<n>-<k>', () => {
+  assert.equal(factoryBranch({ issueNumber: 70, branch: 'agent/issue-70' }), 'factory/gh-70');
+  assert.equal(factoryBranch({ issueNumber: 70, branch: 'factory/gh-70' }), 'factory/gh-70');
+  assert.equal(factoryBranch({ issueNumber: 70, branch: 'agent/issue-70-2' }), 'factory/gh-70-2');
+  assert.equal(factoryBranch({ issueNumber: 7, branch: 'agent/issue-70-2' }), 'factory/gh-7');
 });

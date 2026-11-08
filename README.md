@@ -1,6 +1,6 @@
 # AI Developer Agent
 
-An autonomous coding agent that works GitHub issues from start to finish. You label an issue. The agent reads the repository, asks questions in the issue comments when it is blocked, writes the change, opens a pull request, and revises it as reviewers comment. It keeps going until the pull request is merged or closed.
+An autonomous coding agent that works GitHub issues from start to finish. You label an issue. The agent reads the repository, asks questions in the issue comments when it is blocked, writes the change, opens a pull request, and revises it as reviewers comment. It keeps going until the issue is closed. If the issue needs more than one pull request, a later comment starts the next one.
 
 It runs on AWS and is built around one constraint: **the agent waits for humans for free.** People answer in minutes or in days. While the agent waits, nothing is running and nothing is billed for compute.
 
@@ -25,7 +25,7 @@ It runs on AWS and is built around one constraint: **the agent waits for humans 
 3. A **durable orchestrator** (a Lambda durable function) owns the run. It launches short-lived **work segments**, one at a time, and waits for people in between.
 4. Each segment runs in a disposable **Lambda MicroVM**. It clones the repository, runs Claude (through Amazon Bedrock, or through Claude Code on a Claude subscription: you [choose](#choosing-the-model-backend)), commits and pushes, and reports back. Then the VM is terminated.
 5. Comments from authorized people (owners, members and collaborators) wake the orchestrator, which starts another segment with the new comments.
-6. The run ends when the pull request is merged (done) or closed.
+6. The run ends when the issue is closed (done). Merging or closing a pull request does not end it: the pull request is unlinked, and the next comment on the issue starts a new pull request on a fresh branch (`agent/issue-<n>`, then `agent/issue-<n>-2`, and so on).
 
 Nothing about the agent lives in a long-running process. Everything it knows is rebuilt for each segment from three places: the Git branch, a transcript in S3, and a DynamoDB record. A lost segment loses only the work of that one segment.
 
@@ -123,6 +123,9 @@ sequenceDiagram
     OR->>GH: reply on the PR, update cost section
     H->>GH: merge
     GH->>IN: pull_request.closed (merged)
+    Note over IN,OR: the PR is unlinked, the run carries on
+    H->>GH: close the issue
+    GH->>IN: issues.closed
     IN->>OR: cancel
     Note over OR: run ends as DONE
 ```
@@ -137,13 +140,11 @@ stateDiagram-v2
     WAITING --> RUNNING: authorized comment
     WAITING --> EXPIRED: no reply for 7 days
     EXPIRED --> STARTING: a later comment
-    RUNNING --> DONE: PR merged
-    RUNNING --> CLOSED: PR or issue closed
+    RUNNING --> DONE: issue closed
     RUNNING --> FAILED: segment failed twice
     RUNNING --> BUDGET_EXHAUSTED: token budget used
     FAILED --> STARTING: relabel
-    CLOSED --> STARTING: relabel
-    DONE --> [*]
+    DONE --> STARTING: relabel
     BUDGET_EXHAUSTED --> [*]
 ```
 
@@ -151,8 +152,11 @@ The states that matter:
 
 - **WAITING** costs nothing. The orchestrator is suspended and no VM exists.
 - **EXPIRED** is the same idea with a time limit: after seven days without a reply the run stops and posts a note. Any later comment resumes it from saved state.
-- **BUDGET_EXHAUSTED** is final. The agent posts a summary of where it got to, and opens a **draft** pull request if it pushed any commits.
-- **DONE, BUDGET_EXHAUSTED** do not accept new comments or relabeling.
+- **BUDGET_EXHAUSTED** is the end of the line for a run that has used its budget. The agent posts a summary of where it got to, and opens a **draft** pull request if it pushed any commits.
+- **DONE** means the issue was closed. It does not accept comments, but relabeling the issue (after reopening it) restarts the run. Older records may say **CLOSED**, which is treated the same way.
+- **BUDGET_EXHAUSTED** does not accept comments, and restarts on relabel only while token budget remains.
+- A merged or closed **pull request** does not change the state. It only unlinks the pull request, so the run can open the next one.
+- When a comment or relabel reaches an ended run, the agent says so in a comment on the issue.
 
 ### No lost comments, no double wakes
 
@@ -475,9 +479,10 @@ Other limits (`MAX_TURNS_PER_SEGMENT`, `HUMAN_WAIT_TIMEOUT`, `SEGMENT_TIMEOUT`, 
 
 **Start, restart, stop**
 
-- Label an issue to start. Relabel an issue whose run **FAILED** or was **CLOSED** to restart it. `DONE` and `BUDGET_EXHAUSTED` runs stay final.
+- Label an issue to start. Relabel an issue whose run **FAILED** or ended as **DONE** (the issue was closed) to restart it. A **BUDGET_EXHAUSTED** run restarts only while token budget remains.
 - Comment on an **EXPIRED** issue to resume it.
-- Closing the issue, or closing or merging its pull request, ends the run.
+- Closing the issue ends the run. Closing or merging a pull request does not: comment on the issue to start the next pull request.
+- Old `DONE` records from before this rule were written when a pull request merged, and may still point at that merged pull request. Remove its `prNumber` and set `phase` to `IMPLEMENT` in the `META` item before relabeling.
 
 **Where to look**
 

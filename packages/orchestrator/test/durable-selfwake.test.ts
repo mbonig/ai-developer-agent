@@ -68,9 +68,9 @@ test('real durable runtime: unread comment -> park fails -> the orchestrator com
   const seg2 = ref.r.getOperation('segment-2-1'); await seg2.waitForData(WaitingOperationStatus.SUBMITTED);
   assert.equal(log.selfWakes, 1);
   assert.equal((await getMeta(store, key))!.status, 'RUNNING');
-  await requestCancel(store, key, 'closed');
+  await requestCancel(store, key, 'issue closed');
   await seg2.sendCallbackSuccess(result({ type: 'questions', markdown: 'Q2?' }));
 
   const res = await run;
-  assert.equal(res.getResult()?.status, 'CLOSED');
+  assert.equal(res.getResult()?.status, 'DONE');
 });

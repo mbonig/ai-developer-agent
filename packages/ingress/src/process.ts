@@ -1,6 +1,6 @@
 import {
   verifySignature, routeEvent, issueKey, recordDelivery, createMeta, getMeta, appendMessage, wake,
-  resumeAfterExpiry, restartTerminal, requestCancel, getPrLink, setExecution, type Store, type Config,
+  resumeAfterExpiry, restartTerminal, requestCancel, unlinkPr, getPrLink, setExecution, type Store, type Config, type Status,
 } from '@agent/shared';
 
 export interface Deps {
@@ -11,6 +11,8 @@ export interface Deps {
   startExecution(issueKey: string, attempt: string): Promise<string>;
   /** Completes a durable callback with a payload. */
   sendCallback(callbackId: string, payload: unknown): Promise<void>;
+  /** Posts an issue or pull request comment. Optional: without it, dropped events are only logged. */
+  postComment?(a: { installationId: number; owner: string; repo: string; number: number; body: string }): Promise<void>;
   log(msg: string, extra?: Record<string, unknown>): void;
 }
 
@@ -50,6 +52,7 @@ export async function processWebhook(d: Deps, req: Req): Promise<Res> {
           return res(202, 'restarted');
         }
         d.log('start skipped: state exists', { key });
+        await explainDropped(d, key, route.owner, route.repo, route.issueNumber, 'relabel');
         return res(200, 'exists');
       }
       await setExecution(d.store, key, await d.startExecution(key, '1'));
@@ -64,11 +67,25 @@ export async function processWebhook(d: Deps, req: Req): Promise<Res> {
       return res(200, r.flagged ? 'cancel requested' : 'not active');
     }
 
+    case 'prFinished': {
+      // A merged or closed pull request does not end the run. It only frees the run to open the next one.
+      const key = await getPrLink(d.store, route.owner, route.repo, route.prNumber);
+      if (!key) return res(200, 'untracked');
+      const issueNumber = Number(/#(\d+)$/.exec(key)![1]);
+      const unlinked = await unlinkPr(d.store, key, route.owner, route.repo, issueNumber, route.prNumber);
+      d.log('pull request finished', { key, prNumber: route.prNumber, merged: route.merged, unlinked });
+      return res(200, unlinked ? 'unlinked' : 'not linked');
+    }
+
     case 'message': {
       const key = await resolveKey(d.store, route);
       if (!key) return res(200, 'untracked');
       const seq = await appendMessage(d.store, key, route.msg);
-      if (seq === undefined) return res(200, 'not accepting');
+      if (seq === undefined) {
+        d.log('comment dropped: run has ended', { key });
+        await explainDropped(d, key, route.owner, route.repo, route.issueNumber ?? route.prNumber, 'comment');
+        return res(200, 'not accepting');
+      }
       const cb = await wake(d.store, key);
       if (cb) { await d.sendCallback(cb, { wake: true }); return res(202, 'woken'); }
       if (await resumeAfterExpiry(d.store, key)) {
@@ -90,4 +107,25 @@ async function resolveKey(
   }
   if (r.prNumber !== undefined) return getPrLink(store, r.owner, r.repo, r.prNumber);
   return undefined;
+}
+
+const WHY_ENDED: Partial<Record<Status, string>> = {
+  DONE: 'This run ended when the issue was closed. To start it again, reopen the issue and apply the `agent` label.',
+  CLOSED: 'This run ended when the issue was closed. To start it again, reopen the issue and apply the `agent` label.',
+  FAILED: 'This run stopped after an error. Remove the `agent` label and apply it again to start it again.',
+  BUDGET_EXHAUSTED: 'This run used up its token budget, so it will not continue.',
+};
+
+/** A comment or relabel that reaches an ended run changes nothing. Say so on the issue, so it is not a silent failure. */
+async function explainDropped(
+  d: Deps, key: string, owner: string, repo: string, target: number | undefined, what: 'comment' | 'relabel',
+): Promise<void> {
+  if (!d.postComment || target === undefined) return;
+  try {
+    const meta = await getMeta(d.store, key);
+    const why = meta && WHY_ENDED[meta.status];
+    if (!meta || !why) return; // an active run: the relabel was a no-op, and there is nothing to explain
+    const lead = what === 'comment' ? 'I did not act on your comment.' : 'I did not restart on that label.';
+    await d.postComment({ installationId: meta.installationId, owner, repo, number: target, body: `${lead} ${why}` });
+  } catch (e) { d.log('could not explain dropped event', { key, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
 }
