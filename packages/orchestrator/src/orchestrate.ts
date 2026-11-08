@@ -43,9 +43,9 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     ctx.step(name, () => d.github.postComment({ installationId: meta.installationId, owner, repo, number: target, body, marker: `${key}:${marker}` }));
 
   const finalizeCancel = async (iter: number, meta: IssueMeta) => {
-    const status = meta.closeReason === 'merged' ? 'DONE' : 'CLOSED';
-    await ctx.step(`finish-cancel-${iter}`, () => finish(store, key, status, meta.closeReason));
-    return { status };
+    // The issue closing is the only thing that ends a run, and it ends it as DONE. A merged or closed pull request does not.
+    await ctx.step(`finish-cancel-${iter}`, () => finish(store, key, 'DONE', meta.closeReason));
+    return { status: 'DONE' };
   };
 
   let continues = 0; let limitWaits = 0;

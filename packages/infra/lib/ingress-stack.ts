@@ -22,11 +22,12 @@ export class IngressStack extends Stack {
     this.fn = new lambda.Function(this, 'Ingress', {
       runtime: lambda.Runtime.NODEJS_24_X, architecture: lambda.Architecture.ARM_64, handler: 'index.handler',
       code: lambda.Code.fromAsset(bundle('ingress', 'packages/ingress/src/index.ts')),
-      timeout: Duration.seconds(10), memorySize: 256,
+      timeout: Duration.seconds(15), memorySize: 256,
       environment: {
         TABLE_NAME: state.table.tableName,
         WEBHOOK_SECRET_ARN: state.webhookSecret.secretArn,
         ORCHESTRATOR_FUNCTION_ARN: orchestrator.alias.functionArn, // qualified ARN, required for durable invocations
+        TOKEN_VENDOR_FUNCTION: state.tokenVendor.functionArn, // to say so on the issue when a comment or relabel is dropped
         GITHUB_ORG: cfg.githubOrg,
         AGENT_LABEL: cfg.agentLabel,
         MAX_TOKENS_PER_ISSUE: cfg.maxTokensPerIssue,
@@ -34,6 +35,7 @@ export class IngressStack extends Stack {
     });
     state.table.grantReadWriteData(this.fn);
     state.webhookSecret.grantRead(this.fn);
+    state.tokenVendor.grantInvoke(this.fn);
     this.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction', 'lambda:SendDurableExecutionCallbackSuccess'],
       resources: [orchestrator.fn.functionArn, `${orchestrator.fn.functionArn}:*`],

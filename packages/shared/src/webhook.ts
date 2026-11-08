@@ -16,7 +16,10 @@ export const isAuthorizedAssociation = (a: string | undefined): boolean => !!a &
 export type Route =
   | { kind: 'ignore'; reason: string }
   | { kind: 'start'; owner: string; repo: string; issueNumber: number; installationId: number }
-  | { kind: 'cancel'; owner: string; repo: string; issueNumber?: number; prNumber?: number; reason: string }
+  /** The issue closed: the only event that ends a run. */
+  | { kind: 'cancel'; owner: string; repo: string; issueNumber: number; reason: string }
+  /** A pull request was merged or closed. The run carries on; the PR is just unlinked so the next one can start. */
+  | { kind: 'prFinished'; owner: string; repo: string; prNumber: number; merged: boolean }
   | {
       kind: 'message';
       owner: string;
@@ -44,10 +47,7 @@ export function routeEvent(eventName: string, p: any, agentLabel: string, allowe
     case 'issues.closed':
       return { kind: 'cancel', owner, repo, issueNumber: p.issue.number, reason: 'issue closed' };
     case 'pull_request.closed':
-      return {
-        kind: 'cancel', owner, repo, prNumber: p.pull_request.number,
-        reason: p.pull_request.merged ? 'merged' : 'closed',
-      };
+      return { kind: 'prFinished', owner, repo, prNumber: p.pull_request.number, merged: !!p.pull_request.merged };
     case 'issue_comment.created': {
       const c = p.comment;
       if (!authorOk(c?.author_association)) return { kind: 'ignore', reason: `unauthorized author ${c?.user?.login}` };

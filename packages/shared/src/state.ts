@@ -1,7 +1,7 @@
 import {
-  DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, TransactWriteCommand, QueryCommand, ScanCommand,
+  DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, TransactWriteCommand, QueryCommand, ScanCommand, DeleteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { TERMINAL_STATUSES, msgSk, prKey, type IssueMeta, type InboxMessage, type Status } from './types.ts';
+import { TERMINAL_STATUSES, agentBranch, msgSk, prKey, type IssueMeta, type InboxMessage, type Status } from './types.ts';
 
 export interface Store { doc: DynamoDBDocumentClient; table: string }
 
@@ -21,7 +21,7 @@ export async function createMeta(
 ): Promise<boolean> {
   const meta = {
     PK: pk, SK: 'META', status: 'STARTING', phase: 'IMPLEMENT', inboxSeq: 0, consumedSeq: 0, segmentSeq: 0, tokensUsed: 0,
-    branch: `agent/issue-${init.issueNumber}`,
+    branch: agentBranch(init.issueNumber),
     transcriptKey: `transcripts/${init.owner}/${init.repo}/${init.issueNumber}.json`,
     installationId: init.installationId, updatedAt: now(),
   };
@@ -121,10 +121,7 @@ export async function requestCancel(s: Store, pk: string, reason: string): Promi
   try {
     await s.doc.send(new UpdateCommand({
       TableName: s.table, Key: { PK: pk, SK: 'META' },
-      // GitHub closes the linked issue moments after a merge. "merged" must win over a later "issue closed", in either order.
-      UpdateExpression: reason === 'merged'
-        ? 'SET cancelRequested = :t, closeReason = :r, updatedAt = :u'
-        : 'SET cancelRequested = :t, closeReason = if_not_exists(closeReason, :r), updatedAt = :u',
+      UpdateExpression: 'SET cancelRequested = :t, closeReason = if_not_exists(closeReason, :r), updatedAt = :u',
       ConditionExpression: `attribute_exists(PK) AND ${NOT_TERMINAL}`,
       ExpressionAttributeNames: { '#status': 'status' },
       ExpressionAttributeValues: { ':t': true, ':r': reason, ':u': now(), ...TERMINAL_VALUES },
@@ -149,6 +146,26 @@ export async function linkPr(s: Store, issuePk: string, owner: string, repo: str
     UpdateExpression: 'SET prNumber = :p, updatedAt = :u',
     ExpressionAttributeValues: { ':p': prNumber, ':u': now() },
   }));
+}
+
+/**
+ * A pull request was merged or closed. If it is the one this run is linked to, unlink it and go back to implementing,
+ * on a fresh branch, so the next pull request starts clean. The run itself carries on. Returns true when it unlinked.
+ */
+export async function unlinkPr(s: Store, issuePk: string, owner: string, repo: string, issueNumber: number, prNumber: number): Promise<boolean> {
+  const meta = await getMeta(s, issuePk);
+  if (!meta || meta.prNumber !== prNumber) return false;
+  const nextSeq = (meta.prSeq ?? 1) + 1;
+  try {
+    await s.doc.send(new UpdateCommand({
+      TableName: s.table, Key: { PK: issuePk, SK: 'META' },
+      UpdateExpression: 'SET phase = :p, prSeq = :k, branch = :b, updatedAt = :u REMOVE prNumber',
+      ConditionExpression: 'prNumber = :n',
+      ExpressionAttributeValues: { ':p': 'IMPLEMENT', ':k': nextSeq, ':b': agentBranch(issueNumber, nextSeq), ':n': prNumber, ':u': now() },
+    }));
+  } catch (e) { if (isCondFail(e)) return false; throw e; } // a duplicate delivery got there first
+  await s.doc.send(new DeleteCommand({ TableName: s.table, Key: { PK: prKey(owner, repo, prNumber), SK: 'LINK' } }));
+  return true;
 }
 
 export async function getPrLink(s: Store, owner: string, repo: string, prNumber: number): Promise<string | undefined> {
@@ -276,7 +293,7 @@ export async function listReferencedMicrovms(s: Store): Promise<Set<string>> {
 }
 
 /**
- * Relabeling an issue whose run FAILED or was CLOSED starts it again (no active run). DONE stays final. BUDGET_EXHAUSTED restarts only while tokens remain under the cap.
+ * Relabeling an issue whose run FAILED, was CLOSED, or is DONE (the issue was closed) starts it again (no active run). BUDGET_EXHAUSTED restarts only while tokens remain under the cap.
  * Returns true for the single winner. Inbox, branch, PR link and transcript are kept so the new run resumes the work.
  */
 export async function restartTerminal(s: Store, pk: string, opts: { maxTokens?: number } = {}): Promise<boolean> {
@@ -286,9 +303,9 @@ export async function restartTerminal(s: Store, pk: string, opts: { maxTokens?: 
       TableName: s.table, Key: { PK: pk, SK: 'META' },
       UpdateExpression: 'SET #status = :s, updatedAt = :u REMOVE cancelRequested, closeReason, callbackId, microvmId, segmentCallbackId',
       // BUDGET_EXHAUSTED is restartable only while token budget remains (it also covers runs that stopped for other reasons).
-      ConditionExpression: exhaustedOk ? '#status IN (:f, :c) OR (#status = :b AND tokensUsed < :cap)' : '#status IN (:f, :c)',
+      ConditionExpression: exhaustedOk ? '#status IN (:f, :c, :d) OR (#status = :b AND tokensUsed < :cap)' : '#status IN (:f, :c, :d)',
       ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':s': 'STARTING', ':f': 'FAILED', ':c': 'CLOSED', ':u': now(), ...(exhaustedOk ? { ':b': 'BUDGET_EXHAUSTED', ':cap': opts.maxTokens } : {}) },
+      ExpressionAttributeValues: { ':s': 'STARTING', ':f': 'FAILED', ':c': 'CLOSED', ':d': 'DONE', ':u': now(), ...(exhaustedOk ? { ':b': 'BUDGET_EXHAUSTED', ':cap': opts.maxTokens } : {}) },
     }));
     return true;
   } catch (e) { if (isCondFail(e)) return false; throw e; }

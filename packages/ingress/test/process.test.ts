@@ -11,11 +11,12 @@ const PORT = 8124; const SECRET = 'test-signing-key';
 const raw = new DynamoDBClient({ endpoint: `http://localhost:${PORT}`, region: 'us-east-1', credentials: { accessKeyId: 'x', secretAccessKey: 'x' } });
 const store: Store = { doc: DynamoDBDocumentClient.from(raw), table: 'agent' };
 const cname = `ddb-ingress-test-${process.pid}`;
-let started: string[] = []; let callbacks: Array<[string, unknown]> = [];
+let started: string[] = []; let callbacks: Array<[string, unknown]> = []; let posted: Array<{ number: number; body: string }> = [];
 const deps: Deps = {
   store, config: { agentLabel: 'agent', githubOrg: 'mbonig', maxTokensPerIssue: 1000 }, webhookSecret: SECRET,
   startExecution: async (k, a) => { started.push(`${k}:${a}`); return 'arn:exec'; },
   sendCallback: async (id, p) => { callbacks.push([id, p]); }, log: () => {},
+  postComment: async (a) => { posted.push({ number: a.number, body: a.body }); },
 };
 let d = 0;
 const send = (event: string, payload: object, secret = SECRET, delivery = `d${++d}`) => {
@@ -89,7 +90,7 @@ test('comment on expired issue restarts with a fresh execution name', async () =
   assert.equal((await getMeta(store, pk))?.status, 'STARTING');
 });
 
-test('PR review comment routes via LINK; PR merge cancels and wakes', async () => {
+test('PR review comment routes via LINK; PR merge unlinks and leaves the run alone; the issue closing cancels and wakes', async () => {
   callbacks = []; const pk = issueKey('mbonig', 'app', 2);
   await linkPr(store, pk, 'mbonig', 'app', 50);
   await setStatus(pk, 'RUNNING');
@@ -97,9 +98,14 @@ test('PR review comment routes via LINK; PR merge cancels and wakes', async () =
   assert.equal((await send('pull_request_review_comment', rc)).body, 'queued');
   assert.equal((await send('pull_request_review_comment', { ...rc, pull_request: { number: 999 } })).body, 'untracked');
   await setStatus(pk, 'WAITING', 'cb2');
-  await send('pull_request', { ...repo, action: 'closed', pull_request: { number: 50, merged: true } });
+  assert.equal((await send('pull_request', { ...repo, action: 'closed', pull_request: { number: 50, merged: true } })).body, 'unlinked');
+  assert.deepEqual(callbacks, []);
+  let m = (await getMeta(store, pk))!;
+  assert.equal(m.status, 'WAITING'); assert.equal(m.cancelRequested, undefined); assert.equal(m.prNumber, undefined); assert.equal(m.branch, 'agent/issue-2-2');
+  assert.equal((await send('pull_request', { ...repo, action: 'closed', pull_request: { number: 50, merged: true } })).body, 'untracked'); // the link is gone
+  assert.equal((await send('issues', { ...repo, action: 'closed', issue: { number: 2 } })).body, 'cancel requested');
   assert.deepEqual(callbacks, [['cb2', { cancel: true }]]);
-  const m = await getMeta(store, pk); assert.equal(m?.cancelRequested, true); assert.equal(m?.closeReason, 'merged');
+  m = (await getMeta(store, pk))!; assert.equal(m.cancelRequested, true); assert.equal(m.closeReason, 'issue closed');
 });
 
 test('relabeling a FAILED issue restarts it with a new execution name; an exhausted run restarts only under the cap; DONE and active runs are left alone', async () => {
@@ -112,10 +118,35 @@ test('relabeling a FAILED issue restarts it with a new execution name; an exhaus
   assert.equal(started.length, 2); assert.match(started[1], /^ISSUE#mbonig\/app#20:\d{10,}$/);
   assert.equal((await getMeta(store, pk))?.status, 'STARTING');
   await setStatus(pk, 'DONE');
-  assert.equal((await send('issues', labeled(20))).body, 'exists');              // merged: stays final
+  assert.equal((await send('issues', labeled(20))).body, 'restarted');           // the issue was closed, then reopened and relabeled
+  await setStatus(pk, 'CLOSED');
+  assert.equal((await send('issues', labeled(20))).body, 'restarted');
+  posted = [];
   await setStatus(pk, 'BUDGET_EXHAUSTED');                                        // tokensUsed is 0, under the cap: restartable
   assert.equal((await send('issues', labeled(20))).body, 'restarted');
   await setStatus(pk, 'BUDGET_EXHAUSTED');
   await store.doc.send(new UpdateCommand({ TableName: 'agent', Key: { PK: pk, SK: 'META' }, UpdateExpression: 'SET tokensUsed = :t', ExpressionAttributeValues: { ':t': 1000 } }));
   assert.equal((await send('issues', labeled(20))).body, 'exists');              // at the cap: final
+});
+
+test('a comment or relabel that reaches an ended run is answered on the issue', async () => {
+  const pk = issueKey('mbonig', 'app', 30); posted = [];
+  await send('issues', labeled(30));
+  await setStatus(pk, 'DONE');
+  assert.equal((await send('issue_comment', comment(30))).body, 'not accepting');
+  assert.equal(posted.length, 1); assert.equal(posted[0].number, 30); assert.match(posted[0].body, /did not act on your comment.*issue was closed.*reopen the issue/s);
+  await setStatus(pk, 'RUNNING');
+  await send('issues', labeled(30));                                             // an active run: nothing to explain
+  assert.equal(posted.length, 1);
+  await setStatus(pk, 'BUDGET_EXHAUSTED');
+  await store.doc.send(new UpdateCommand({ TableName: 'agent', Key: { PK: pk, SK: 'META' }, UpdateExpression: 'SET tokensUsed = :t', ExpressionAttributeValues: { ':t': 1000 } }));
+  assert.equal((await send('issues', labeled(30))).body, 'exists');
+  assert.equal(posted.length, 2); assert.match(posted[1].body, /did not restart.*token budget/s);
+});
+
+test('failing to post the explanation does not fail the webhook', async () => {
+  const pk = issueKey('mbonig', 'app', 31);
+  await send('issues', labeled(31)); await setStatus(pk, 'FAILED');
+  const ok = deps.postComment; deps.postComment = async () => { throw new Error('boom'); };
+  try { assert.equal((await send('issue_comment', comment(31))).body, 'not accepting'); } finally { deps.postComment = ok; }
 });

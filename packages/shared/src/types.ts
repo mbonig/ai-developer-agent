@@ -17,6 +17,8 @@ export interface IssueMeta {
   segmentSeq: number;
   branch: string;
   prNumber?: number;
+  /** Which pull request this run is on (1 for the first). Each one gets its own branch. */
+  prSeq?: number;
   transcriptKey: string;
   installationId: number;
   tokensUsed: number;
@@ -79,5 +81,7 @@ export type SegmentResult = SegmentOutcome & {
 };
 
 export const issueKey = (owner: string, repo: string, n: number) => `ISSUE#${owner}/${repo}#${n}`;
+/** The branch for the k-th pull request of an issue: agent/issue-<n> for the first, agent/issue-<n>-<k> after that. */
+export const agentBranch = (issueNumber: number, k = 1) => (k <= 1 ? `agent/issue-${issueNumber}` : `agent/issue-${issueNumber}-${k}`);
 export const prKey = (owner: string, repo: string, n: number) => `PR#${owner}/${repo}#${n}`;
 export const msgSk = (seq: number) => `MSG#${String(seq).padStart(10, '0')}`;

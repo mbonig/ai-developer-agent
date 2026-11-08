@@ -114,7 +114,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
       modeInfo = detectMode(work, { ENABLE_FACTORY: factoryUsable ? 'true' : 'false' });
       if (modeInfo.mode === 'factory') {
         // The factory creates its own worktree and branch factory/<key> from origin/main. Resume it if an earlier segment pushed it.
-        branch = `factory/gh-${job.issueNumber}`;
+        branch = factoryBranch(job);
         if (await g.remoteHasBranch(work, branch, await freshToken())) await g.fetchBranchLocal(work, branch, await freshToken());
       } else {
         await g.checkoutBranch(work, branch, await freshToken());
@@ -224,4 +224,10 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     if (d.saveDebugLog) await d.saveDebugLog(job, lines.join('\n')).catch(() => {});
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/** The factory's branch for this issue: factory/gh-<n> for the first pull request, factory/gh-<n>-<k> for the k-th. */
+export function factoryBranch(job: Pick<SegmentJob, 'issueNumber' | 'branch'>): string {
+  const k = new RegExp(`^agent/issue-${job.issueNumber}-(\\d+)$`).exec(job.branch)?.[1];
+  return `factory/gh-${job.issueNumber}${k ? `-${k}` : ''}`;
 }

@@ -97,10 +97,28 @@ test('resume after expiry: single winner; PR link; delivery dedupe; cancel wakes
   assert.deepEqual(await st.requestCancel(store, issueKey('o', 'r', 99999), 'x'), { flagged: false });
 });
 
-test('a merge wins over the issue-closed event that follows it, in either order', async () => {
-  for (const order of [['merged', 'issue closed'], ['issue closed', 'merged']]) {
-    const pk = await fresh(); await setStatus(pk, 'RUNNING');
-    for (const reason of order) await st.requestCancel(store, pk, reason);
-    assert.equal((await st.getMeta(store, pk))?.closeReason, 'merged', order.join(' then '));
+test('a finished PR is unlinked: phase back to implementing, fresh branch, run untouched; a repeat or a stale PR does nothing', async () => {
+  const pk = await fresh(); await setStatus(pk, 'WAITING');
+  const n = Number(pk.split('#').pop());
+  await st.linkPr(store, pk, 'o', 'r', 10); await st.setPhase(store, pk, 'REVIEW');
+  assert.equal(await st.unlinkPr(store, pk, 'o', 'r', n, 11), false);                // some other PR
+  assert.equal(await st.unlinkPr(store, pk, 'o', 'r', n, 10), true);
+  assert.equal(await st.unlinkPr(store, pk, 'o', 'r', n, 10), false);                // duplicate delivery
+  let m = (await st.getMeta(store, pk))!;
+  assert.equal(m.status, 'WAITING'); assert.equal(m.phase, 'IMPLEMENT'); assert.equal(m.prNumber, undefined);
+  assert.equal(m.branch, `agent/issue-${n}-2`); assert.equal(m.prSeq, 2);
+  assert.equal(await st.getPrLink(store, 'o', 'r', 10), undefined);
+  await st.linkPr(store, pk, 'o', 'r', 12);
+  assert.equal(await st.unlinkPr(store, pk, 'o', 'r', n, 12), true);
+  m = (await st.getMeta(store, pk))!; assert.equal(m.branch, `agent/issue-${n}-3`);
+});
+
+test('an ended run restarts from DONE or CLOSED as well as FAILED, and keeps its work', async () => {
+  for (const status of ['DONE', 'CLOSED', 'FAILED']) {
+    const pk = await fresh(); await setStatus(pk, status);
+    assert.equal(await st.restartTerminal(store, pk), true, status);
+    assert.equal((await st.getMeta(store, pk))?.status, 'STARTING');
   }
+  const pk = await fresh(); await setStatus(pk, 'BUDGET_EXHAUSTED');
+  assert.equal(await st.restartTerminal(store, pk), false);
 });

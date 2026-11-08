@@ -15,6 +15,21 @@ async function webhookSecret(): Promise<string> {
   return secretCache;
 }
 
+/** Posts an issue or pull request comment as the GitHub App, with a token from the token vendor. */
+async function postComment(a: { installationId: number; owner: string; repo: string; number: number; body: string }): Promise<void> {
+  const t = await lambda.send(new InvokeCommand({
+    FunctionName: process.env.TOKEN_VENDOR_FUNCTION!, Payload: JSON.stringify({ installationId: a.installationId, repo: a.repo }),
+  }));
+  if (t.FunctionError) throw new Error('token vendor failed');
+  const token = JSON.parse(Buffer.from(t.Payload!).toString()).token as string;
+  const r = await fetch(`https://api.github.com/repos/${a.owner}/${a.repo}/issues/${a.number}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ai-developer-agent' },
+    body: JSON.stringify({ body: a.body }),
+  });
+  if (!r.ok) throw new Error(`GitHub comment failed: ${r.status}`);
+}
+
 const safeName = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60);
 
 export async function handler(event: { headers: Record<string, string>; body?: string; isBase64Encoded?: boolean }) {
@@ -37,6 +52,7 @@ export async function handler(event: { headers: Record<string, string>; body?: s
         CallbackId: callbackId, Result: Buffer.from(JSON.stringify(payload)),
       }));
     },
+    ...(process.env.TOKEN_VENDOR_FUNCTION ? { postComment } : {}),
     log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })),
   };
   const r = await processWebhook(deps, { headers: event.headers ?? {}, rawBody });

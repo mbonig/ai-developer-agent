@@ -51,8 +51,11 @@ test('inline review comment carries path/line/hunk; empty review ignored', () =>
   assert.equal(routeEvent('pull_request_review', rv, 'agent').kind, 'ignore');
 });
 
-test('close events cancel', () => {
-  assert.equal(routeEvent('pull_request', { ...base, action: 'closed', pull_request: { number: 7, merged: true } }, 'agent').kind, 'cancel');
+test('only the issue closing cancels; a PR closing or merging is a prFinished', () => {
+  const merged = routeEvent('pull_request', { ...base, action: 'closed', pull_request: { number: 7, merged: true } }, 'agent');
+  assert.deepEqual(merged, { kind: 'prFinished', owner: 'org', repo: 'repo', prNumber: 7, merged: true });
+  const closed = routeEvent('pull_request', { ...base, action: 'closed', pull_request: { number: 7, merged: false } }, 'agent');
+  assert.equal(closed.kind === 'prFinished' && closed.merged, false);
   assert.equal(routeEvent('issues', { ...base, action: 'closed', issue: { number: 5 } }, 'agent').kind, 'cancel');
 });
 
