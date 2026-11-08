@@ -2,12 +2,19 @@ import { LambdaClient, InvokeCommand, SendDurableExecutionCallbackSuccessCommand
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { parseAgentBackend, type AgentBackend } from '@agent/shared';
 import { processWebhook, type Deps } from './process.ts';
 
 const lambda = new LambdaClient({});
 const secrets = new SecretsManagerClient({});
 const doc = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 let secretCache: string | undefined;
+
+// Only used as the default when a comment asks for a model but not a backend. The deployment's actual, possibly
+// per-segment, choice (the AGENT_BACKEND_PARAM SSM parameter) is read where the work actually runs.
+function defaultBackend(): AgentBackend {
+  try { return parseAgentBackend(process.env.AGENT_BACKEND || 'bedrock', 'AGENT_BACKEND'); } catch { return 'bedrock'; }
+}
 
 // The webhook secret is read by the function at runtime (the role is granted read on this one secret only).
 async function webhookSecret(): Promise<string> {
@@ -36,7 +43,7 @@ export async function handler(event: { headers: Record<string, string>; body?: s
   const rawBody = event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString('utf8') : (event.body ?? '');
   const deps: Deps = {
     store: { doc, table: process.env.TABLE_NAME! },
-    config: { agentLabel: process.env.AGENT_LABEL || 'agent', githubOrg: process.env.GITHUB_ORG || 'mbonig', maxTokensPerIssue: Number(process.env.MAX_TOKENS_PER_ISSUE || 0) },
+    config: { agentLabel: process.env.AGENT_LABEL || 'agent', githubOrg: process.env.GITHUB_ORG || 'mbonig', maxTokensPerIssue: Number(process.env.MAX_TOKENS_PER_ISSUE || 0), agentBackend: defaultBackend() },
     webhookSecret: await webhookSecret(),
     async startExecution(issueKey, attempt) {
       const r = await lambda.send(new InvokeCommand({

@@ -13,7 +13,7 @@ const store: Store = { doc: DynamoDBDocumentClient.from(raw), table: 'agent' };
 const cname = `ddb-ingress-test-${process.pid}`;
 let started: string[] = []; let callbacks: Array<[string, unknown]> = []; let posted: Array<{ number: number; body: string }> = [];
 const deps: Deps = {
-  store, config: { agentLabel: 'agent', githubOrg: 'mbonig', maxTokensPerIssue: 1000 }, webhookSecret: SECRET,
+  store, config: { agentLabel: 'agent', githubOrg: 'mbonig', maxTokensPerIssue: 1000, agentBackend: 'bedrock' }, webhookSecret: SECRET,
   startExecution: async (k, a) => { started.push(`${k}:${a}`); return 'arn:exec'; },
   sendCallback: async (id, p) => { callbacks.push([id, p]); }, log: () => {},
   postComment: async (a) => { posted.push({ number: a.number, body: a.body }); },
@@ -26,9 +26,9 @@ const send = (event: string, payload: object, secret = SECRET, delivery = `d${++
     'X-Hub-Signature-256': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex') } });
 };
 const repo = { repository: { full_name: 'mbonig/app' }, sender: { type: 'User' }, installation: { id: 7 } };
-const labeled = (n: number) => ({ ...repo, action: 'labeled', label: { name: 'agent' }, issue: { number: n } });
-const comment = (n: number, assoc = 'OWNER') => ({ ...repo, action: 'created', issue: { number: n },
-  comment: { author_association: assoc, user: { login: 'u' }, body: 'hi', html_url: 'u', created_at: 't' } });
+const labeled = (n: number, issue: Record<string, unknown> = {}) => ({ ...repo, action: 'labeled', label: { name: 'agent' }, issue: { number: n, ...issue } });
+const comment = (n: number, assoc = 'OWNER', body = 'hi') => ({ ...repo, action: 'created', issue: { number: n },
+  comment: { author_association: assoc, user: { login: 'u' }, body, html_url: 'u', created_at: 't' } });
 const setStatus = (pk: string, s: string, cb?: string) => store.doc.send(new UpdateCommand({
   TableName: 'agent', Key: { PK: pk, SK: 'META' },
   UpdateExpression: cb ? 'SET #s = :s, callbackId = :c' : 'SET #s = :s',
@@ -149,4 +149,34 @@ test('failing to post the explanation does not fail the webhook', async () => {
   await send('issues', labeled(31)); await setStatus(pk, 'FAILED');
   const ok = deps.postComment; deps.postComment = async () => { throw new Error('boom'); };
   try { assert.equal((await send('issue_comment', comment(31))).body, 'not accepting'); } finally { deps.postComment = ok; }
+});
+
+test('a clear request in the issue body is stored silently, with no comment posted', async () => {
+  posted = []; const pk = issueKey('mbonig', 'app', 40);
+  await send('issues', labeled(40, { title: 'Add a widget', body: 'Please use claude and sonnet 5.5 for this.' }));
+  assert.deepEqual((await getMeta(store, pk))?.modelOverride, { backend: 'claude-code', modelId: 'claude-sonnet-5-5' });
+  assert.equal(posted.length, 0);
+});
+
+test('an unclear request in the issue body is stored as a best guess, and explained in a comment', async () => {
+  posted = []; const pk = issueKey('mbonig', 'app', 41);
+  await send('issues', labeled(41, { title: 'Add a widget', body: 'use bedrock and kimi k3' }));
+  assert.deepEqual((await getMeta(store, pk))?.modelOverride, { backend: 'bedrock' });
+  assert.equal(posted.length, 1); assert.equal(posted[0].number, 41); assert.match(posted[0].body, /kimi.*not an Anthropic model/is);
+});
+
+test('plain issue text with no request leaves the override unset', async () => {
+  posted = []; const pk = issueKey('mbonig', 'app', 42);
+  await send('issues', labeled(42, { title: 'Fix a bug', body: 'The bedrock integration throws on empty input.' }));
+  assert.equal((await getMeta(store, pk))?.modelOverride, undefined);
+  assert.equal(posted.length, 0);
+});
+
+test('a later comment can clarify an earlier ambiguous request, replacing the stored override', async () => {
+  posted = []; const pk = issueKey('mbonig', 'app', 43);
+  await send('issues', labeled(43, { title: 'Add a widget', body: 'use sonnet 5.5' })); // ambiguous: no backend named
+  assert.deepEqual((await getMeta(store, pk))?.modelOverride, { backend: 'bedrock', modelId: 'us.anthropic.claude-sonnet-5-5' });
+  await setStatus(pk, 'RUNNING');
+  await send('issue_comment', comment(43, 'OWNER', 'Sorry, I meant use claude code with that.'));
+  assert.deepEqual((await getMeta(store, pk))?.modelOverride, { backend: 'claude-code' });
 });

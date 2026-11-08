@@ -81,6 +81,8 @@ export interface ClaudeRunArgs {
   mcp: { command: string; args: string[] };
   runAs?: RunAs;
   claudeBin?: string;
+  /** `--model` value (a Claude Code model name or id). Omitted uses Claude Code's own default. */
+  model?: string;
   extraEnv?: Record<string, string>;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
@@ -117,6 +119,7 @@ export function runClaudeOnce(a: ClaudeRunArgs): Promise<OneRun> {
     '--allowedTools', ALLOWED_TOOLS,
     '--mcp-config', a.mcpConfigPath, '--strict-mcp-config',
     '--append-system-prompt', a.systemPrompt,
+    ...(a.model ? ['--model', a.model] : []),
     ...(a.resume ? ['--resume', a.sessionId] : ['--session-id', a.sessionId]),
   ];
   const env: Record<string, string> = {

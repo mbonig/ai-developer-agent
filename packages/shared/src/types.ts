@@ -1,3 +1,5 @@
+import type { ModelOverride } from './config.ts';
+
 export const TERMINAL_STATUSES = ['DONE', 'CLOSED', 'FAILED', 'BUDGET_EXHAUSTED'] as const;
 export const STATUSES = ['STARTING', 'RUNNING', 'WAITING', 'EXPIRED', ...TERMINAL_STATUSES] as const;
 export type Status = (typeof STATUSES)[number];
@@ -26,6 +28,8 @@ export interface IssueMeta {
   closeReason?: string;
   microvmId?: string;
   segmentCallbackId?: string;
+  /** This issue's own backend/model, when the issue text asked for one. Overrides the deployment default for every segment. */
+  modelOverride?: ModelOverride;
   updatedAt: string;
 }
 
@@ -57,6 +61,8 @@ export interface SegmentJob {
   branch: string;
   prNumber: number | null;
   tokenBudgetRemaining: number;
+  /** This issue's own backend/model, when it asked for one. Overrides the deployment default for this segment. */
+  modelOverride?: ModelOverride;
 }
 
 export type SegmentOutcome =

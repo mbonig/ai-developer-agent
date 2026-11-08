@@ -1,11 +1,12 @@
 import {
   verifySignature, routeEvent, issueKey, recordDelivery, createMeta, getMeta, appendMessage, wake,
-  resumeAfterExpiry, restartTerminal, requestCancel, unlinkPr, getPrLink, setExecution, type Store, type Config, type Status,
+  resumeAfterExpiry, restartTerminal, requestCancel, unlinkPr, getPrLink, setExecution, setModelOverride, parseModelRequest,
+  type Store, type Config, type Status, type ModelOverride,
 } from '@agent/shared';
 
 export interface Deps {
   store: Store;
-  config: Pick<Config, 'agentLabel' | 'githubOrg' | 'maxTokensPerIssue'>;
+  config: Pick<Config, 'agentLabel' | 'githubOrg' | 'maxTokensPerIssue' | 'agentBackend'>;
   webhookSecret: string;
   /** Starts a durable execution for the issue and returns its ARN. `attempt` makes the execution name unique. */
   startExecution(issueKey: string, attempt: string): Promise<string>;
@@ -55,6 +56,8 @@ export async function processWebhook(d: Deps, req: Req): Promise<Res> {
         await explainDropped(d, key, route.owner, route.repo, route.issueNumber, 'relabel');
         return res(200, 'exists');
       }
+      // The issue text may ask for a particular backend/model, e.g. "use claude and sonnet 5.5".
+      await applyModelRequest(d, key, { installationId: route.installationId }, route.owner, route.repo, route.issueNumber, `${route.title ?? ''}\n\n${route.body ?? ''}`);
       await setExecution(d.store, key, await d.startExecution(key, '1'));
       return res(202, 'started');
     }
@@ -86,6 +89,9 @@ export async function processWebhook(d: Deps, req: Req): Promise<Res> {
         await explainDropped(d, key, route.owner, route.repo, route.issueNumber ?? route.prNumber, 'comment');
         return res(200, 'not accepting');
       }
+      // A reply may clarify (or change) which backend/model this issue wants.
+      const meta = await getMeta(d.store, key);
+      if (meta) await applyModelRequest(d, key, meta, route.owner, route.repo, route.issueNumber ?? route.prNumber!, route.msg.body);
       const cb = await wake(d.store, key);
       if (cb) { await d.sendCallback(cb, { wake: true }); return res(202, 'woken'); }
       if (await resumeAfterExpiry(d.store, key)) {
@@ -107,6 +113,23 @@ async function resolveKey(
   }
   if (r.prNumber !== undefined) return getPrLink(store, r.owner, r.repo, r.prNumber);
   return undefined;
+}
+
+/**
+ * Looks for a backend/model request in `text` (an issue body, or a later comment). A clear request is stored
+ * silently; an unclear one is stored as the agent's best guess and explained in a comment, so the issue is never
+ * left guessing silently about something it is unsure of.
+ */
+async function applyModelRequest(
+  d: Deps, key: string, ctx: { installationId: number; modelOverride?: ModelOverride }, owner: string, repo: string, target: number, text: string,
+): Promise<void> {
+  try {
+    const r = parseModelRequest(text, ctx.modelOverride?.backend ?? d.config.agentBackend);
+    if (r.resolved) { await setModelOverride(d.store, key, r.resolved); return; }
+    if (!r.clarification) return;
+    await setModelOverride(d.store, key, r.clarification.bestGuess);
+    if (d.postComment) await d.postComment({ installationId: ctx.installationId, owner, repo, number: target, body: r.clarification.markdown });
+  } catch (e) { d.log('model request handling failed', { key, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
 }
 
 const WHY_ENDED: Partial<Record<Status, string>> = {
