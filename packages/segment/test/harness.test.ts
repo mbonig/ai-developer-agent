@@ -273,6 +273,37 @@ test('backend lookup: the looked-up backend wins over the static one', async () 
   assert.equal(h.ok[0].billing, 'subscription');
 });
 
+test('a per-issue model override wins over both the static and looked-up backend, and never calls the lookup', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish'); let lookups = 0;
+  const h = ccDeps(bare, fc, { agentBackend: 'bedrock', getAgentBackend: async () => { lookups++; return 'bedrock'; } });
+  await runSegment(h.d, job({ modelOverride: { backend: 'claude-code' } }));
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  assert.equal(h.ok[0].billing, 'subscription'); assert.equal(lookups, 0);
+});
+
+test('a per-issue model override passes its model id to Claude Code with --model', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish');
+  const h = ccDeps(bare, fc);
+  await runSegment(h.d, job({ modelOverride: { backend: 'claude-code', modelId: 'claude-opus-5-5' } }));
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  const [run] = fc.runs();
+  assert.equal(run.args[run.args.indexOf('--model') + 1], 'claude-opus-5-5');
+});
+
+test('a per-issue model override picks the Bedrock model id used for the Converse call and its cost', async () => {
+  const { bare } = remote();
+  const h = deps(bare, [
+    () => reply([use('1', 'write_file', { path: 'a.txt', content: 'a' })]),
+    () => reply([use('2', 'finish', { title: 'T', body: 'B' })]),
+  ]);
+  const seenModelIds: string[] = []; const orig = h.d.converse;
+  h.d.converse = async (i) => { seenModelIds.push(i.modelId as string); return orig(i); };
+  await runSegment(h.d, job({ modelOverride: { backend: 'bedrock', modelId: 'us.anthropic.claude-sonnet-5-5' } }));
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  assert.ok(seenModelIds.every((m) => m === 'us.anthropic.claude-sonnet-5-5'));
+  assert.ok(Math.abs(h.ok[0].costUsd! - (200 * 2.2 + 20 * 11) / 1e6) < 1e-12, String(h.ok[0].costUsd)); // us.-profile price for this id
+});
+
 test('backend lookup: a failed lookup fails the segment and never falls back to a backend', async () => {
   const { bare } = remote(); const fc = fakeClaude('finish'); let converseCalls = 0;
   const h = ccDeps(bare, fc, { getAgentBackend: async () => { throw new Error('ParameterNotFound'); }, converse: async () => { converseCalls++; throw new Error('should not run'); } });

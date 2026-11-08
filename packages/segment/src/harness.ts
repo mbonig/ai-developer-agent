@@ -73,7 +73,8 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
   const log = (msg: string, extra?: Record<string, unknown>) => { lines.push(JSON.stringify({ t: new Date().toISOString(), msg, ...extra })); base(msg, extra); };
   let backend: AgentBackend;
   try {
-    backend = d.getAgentBackend ? await d.getAgentBackend() : d.agentBackend ?? 'bedrock';
+    // The issue's own request (if any) overrides the deployment default, and needs no SSM lookup.
+    backend = job.modelOverride?.backend ?? (d.getAgentBackend ? await d.getAgentBackend() : d.agentBackend ?? 'bedrock');
   } catch (e) {
     // Never guess: running the wrong backend could spend money the operator chose not to.
     log('backend lookup failed', { message: (e as Error).message });
@@ -81,7 +82,8 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     if (d.saveDebugLog) await d.saveDebugLog(job, lines.join('\n')).catch(() => {});
     return;
   }
-  log('backend selected', { backend });
+  const modelId = job.modelOverride?.modelId;
+  log('backend selected', { backend, modelId: modelId ?? '(default)', fromIssue: !!job.modelOverride });
   let dir: string;
   if (backend === 'claude-code') {
     // Claude Code keys its sessions by working directory, so the path must be the same in every segment.
@@ -172,11 +174,12 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
         maxTurns: d.config.maxTurnsPerSegment, tokenBudget: job.tokenBudgetRemaining, timeoutMs: d.claudeTimeoutMs ?? 100 * 60 * 1000,
         outcomeFile: join(configDir, 'outcome.json'), mcpConfigPath: join(configDir, 'mcp.json'),
         mcp: d.mcpCommand ?? { command: process.execPath, args: [process.argv[1] ?? '', '--mcp-server'] },
-        runAs, claudeBin: d.claudeBin, log,
+        runAs, claudeBin: d.claudeBin, model: modelId, log,
         extraEnv: agentEnv?.SWAMP_API_KEY_FILE ? { SWAMP_API_KEY_FILE: agentEnv.SWAMP_API_KEY_FILE } : undefined,
       });
       outcome = res.outcome; tokensUsed = res.tokensUsed; usage = res.usage; cost = res.costUsd; billing = 'subscription';
     } else {
+      const activeModelId = modelId ?? d.config.bedrockModelId;
       let messages = (await d.loadTranscript(job.transcriptKey)) ?? [];
       let overhead = 0; let overheadUsage: Usage = emptyUsage();
       if (messages.length === 0) {
@@ -184,7 +187,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
         messages = [{ role: 'user', content: [{ text: firstTurn({ owner: job.owner, repo: job.repo, number: job.issueNumber, ...issue, baseBranch: base }, inbox) }] }];
       } else {
         const c = await compactIfNeeded({
-          converse: d.converse, modelId: d.config.bedrockModelId, messages, thresholdTokens: d.config.transcriptCompactTokens,
+          converse: d.converse, modelId: activeModelId, messages, thresholdTokens: d.config.transcriptCompactTokens,
           diff: await g.diffAgainstDefault(work, base).catch(() => ''), log,
         });
         messages = c.messages; overhead = c.tokensUsed; overheadUsage = c.usage;
@@ -192,12 +195,12 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
         appendUserTurn(messages, [{ text: followUpTurn(inbox) }]);
       }
       const run = await runAgent({
-        converse: d.converse, modelId: d.config.bedrockModelId, phase: job.phase, branch, repoSlug: `${job.owner}/${job.repo}`, mode: modeInfo.mode, messages,
+        converse: d.converse, modelId: activeModelId, phase: job.phase, branch, repoSlug: `${job.owner}/${job.repo}`, mode: modeInfo.mode, messages,
         toolCtx: { root: work, runCommandTimeoutSeconds: d.config.runCommandTimeoutSeconds, toolOutputMaxBytes: d.config.toolOutputMaxBytes, runAs, env: agentEnv },
         maxTurns: d.config.maxTurnsPerSegment, tokenBudgetRemaining: Math.max(0, job.tokenBudgetRemaining - overhead),
       });
       outcome = run.outcome; tokensUsed = run.tokensUsed + overhead; usage = addUsage(run.usage, overheadUsage);
-      cost = costUsd(usage, d.config.bedrockModelId); billing = 'bedrock'; transcript = run.messages;
+      cost = costUsd(usage, activeModelId); billing = 'bedrock'; transcript = run.messages;
     }
 
     // Persist, in order: commit, push, state and transcript, then report.

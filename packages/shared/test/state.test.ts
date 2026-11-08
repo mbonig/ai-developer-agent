@@ -122,3 +122,11 @@ test('an ended run restarts from DONE or CLOSED as well as FAILED, and keeps its
   const pk = await fresh(); await setStatus(pk, 'BUDGET_EXHAUSTED');
   assert.equal(await st.restartTerminal(store, pk), false);
 });
+
+test('setModelOverride stores the backend/model, with or without a model id, and can be replaced', async () => {
+  const pk = await fresh();
+  await st.setModelOverride(store, pk, { backend: 'claude-code', modelId: 'claude-sonnet-5-5' });
+  assert.deepEqual((await st.getMeta(store, pk))?.modelOverride, { backend: 'claude-code', modelId: 'claude-sonnet-5-5' });
+  await st.setModelOverride(store, pk, { backend: 'bedrock' });
+  assert.deepEqual((await st.getMeta(store, pk))?.modelOverride, { backend: 'bedrock' });
+});

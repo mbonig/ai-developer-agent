@@ -95,6 +95,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
               segmentSeq, callbackId, inbox: { fromExclusive: meta.consumedSeq, toInclusive: claimed },
               transcriptKey: meta.transcriptKey, branch: meta.branch, prNumber: meta.prNumber ?? null,
               tokenBudgetRemaining: c.maxTokensPerIssue - meta.tokensUsed,
+              ...(meta.modelOverride ? { modelOverride: meta.modelOverride } : {}),
             };
             const h = await d.launcher.launch(job);
             await setMicrovm(store, key, { microvmId: h.id, segmentCallbackId: callbackId });
@@ -134,7 +135,7 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
     const updateCost = (name: string, prNumber: number) => ctx.step(name, async () => {
       await d.github.upsertPrSection({
         installationId: meta.installationId, owner, repo, number: prNumber, marker: COST_MARKER,
-        markdown: renderCostSection(await listSessionCosts(store, key), c.bedrockModelId),
+        markdown: renderCostSection(await listSessionCosts(store, key), meta.modelOverride?.modelId ?? c.bedrockModelId),
       });
     });
     if (meta.prNumber) await updateCost(`cost-${iter}`, meta.prNumber);

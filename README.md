@@ -9,6 +9,7 @@ It runs on AWS and is built around one constraint: **the agent waits for humans 
 - [The life of an issue](#the-life-of-an-issue)
 - [How the agent does the work](#how-the-agent-does-the-work)
 - [Choosing the model backend](#choosing-the-model-backend)
+- [Overriding the model per issue](#overriding-the-model-per-issue)
 - [Security model](#security-model)
 - [Cost and limits](#cost-and-limits)
 - [Repository layout](#repository-layout)
@@ -296,6 +297,22 @@ If `claude-code` is selected and the token is still `UNSET`, segments fail with 
 - **Terms of use.** Using a subscription token for automated, server-side runs is your decision under Anthropic's terms. Check them for your plan.
 - **The token is a credential for your Claude account.** It is read by the harness, given to Claude Code in its environment, and Claude Code is asked to keep it out of the commands it runs (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`). That setting has not been verified against a real run. Until it is, assume the agent could read the token, and use a subscription you are comfortable exposing to the repositories it works on.
 - **Not yet observed end to end.** The runner is tested against the real event format and a stand-in `claude`, and the CLI and MCP server are verified inside a real VM. A full run on a real subscription, including cross-VM resume, still needs to be watched.
+
+## Overriding the model per issue
+
+The deployment default above applies to every issue. A single issue can ask for something different in its body, or in a later comment, e.g.:
+
+> Please use claude and sonnet 5.5 for this.
+
+> use bedrock and sonnet 5.5
+
+The agent recognizes a backend name (`claude`/`claude code` or `bedrock`/`amazon bedrock`), an Anthropic model family and version (`sonnet`, `opus`, `haiku`), or a literal model/inference-profile id in backticks. When both the backend and the model are clear, it switches silently and uses that for every segment of the issue from then on, no matter what the deployment's own setting is.
+
+When something is recognized but not clear enough to act on without asking, for example a model family with no version, a backend with no model named, or a model Claude Code cannot run (anything that is not an Anthropic model), the agent comments on the issue with a question and its best guess, and uses that guess until told otherwise:
+
+> "kimi" is not an Anthropic model, so I do not have a confirmed id for it on Amazon Bedrock. For now I will use Amazon Bedrock, with its default model. If that is not right, tell me exactly which backend (Claude Code or Amazon Bedrock) and model you want, for example "use claude and sonnet 5.5", "use bedrock and sonnet 5.5", or a literal model/inference-profile id in backticks.
+
+Text that does not read like a request (most issues) changes nothing. A later comment can also change an earlier choice, including replacing a best guess once you confirm what you meant. Switching to Claude Code still needs the subscription token described above; without one the run fails clearly rather than falling back to Bedrock.
 
 ## Security model
 

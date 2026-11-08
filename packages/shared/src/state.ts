@@ -2,6 +2,7 @@ import {
   DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, TransactWriteCommand, QueryCommand, ScanCommand, DeleteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { TERMINAL_STATUSES, agentBranch, msgSk, prKey, type IssueMeta, type InboxMessage, type Status } from './types.ts';
+import type { ModelOverride } from './config.ts';
 
 export interface Store { doc: DynamoDBDocumentClient; table: string }
 
@@ -309,6 +310,15 @@ export async function restartTerminal(s: Store, pk: string, opts: { maxTokens?: 
     }));
     return true;
   } catch (e) { if (isCondFail(e)) return false; throw e; }
+}
+
+/** This issue's own backend/model (silently resolved, or the agent's best guess while it waits for clarification). */
+export async function setModelOverride(s: Store, pk: string, o: ModelOverride): Promise<void> {
+  await s.doc.send(new UpdateCommand({
+    TableName: s.table, Key: { PK: pk, SK: 'META' },
+    UpdateExpression: 'SET modelOverride = :o, updatedAt = :u',
+    ExpressionAttributeValues: { ':o': o, ':u': now() },
+  }));
 }
 
 export async function setBranch(s: Store, pk: string, branch: string): Promise<void> {

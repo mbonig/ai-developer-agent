@@ -1,5 +1,12 @@
 export type AgentBackend = 'bedrock' | 'claude-code';
 
+/** A per-issue override of which backend (and optionally which model) runs the agent, in place of the deployment default. */
+export interface ModelOverride {
+  backend: AgentBackend;
+  /** The backend's own model id (a Claude Code `--model` value, or a Bedrock model/inference-profile id). Omitted means that backend's configured default. */
+  modelId?: string;
+}
+
 /** Validates a backend name from configuration. `source` names where it came from, for the error message. */
 export function parseAgentBackend(value: string | undefined, source: string): AgentBackend {
   const v = value?.trim();

@@ -15,7 +15,7 @@ export const isAuthorizedAssociation = (a: string | undefined): boolean => !!a &
 
 export type Route =
   | { kind: 'ignore'; reason: string }
-  | { kind: 'start'; owner: string; repo: string; issueNumber: number; installationId: number }
+  | { kind: 'start'; owner: string; repo: string; issueNumber: number; installationId: number; title?: string; body?: string }
   /** The issue closed: the only event that ends a run. */
   | { kind: 'cancel'; owner: string; repo: string; issueNumber: number; reason: string }
   /** A pull request was merged or closed. The run carries on; the PR is just unlinked so the next one can start. */
@@ -43,7 +43,11 @@ export function routeEvent(eventName: string, p: any, agentLabel: string, allowe
   switch (`${eventName}.${p.action}`) {
     case 'issues.labeled':
       if (p.label?.name !== agentLabel) return { kind: 'ignore', reason: 'other label' };
-      return { kind: 'start', owner, repo, issueNumber: p.issue.number, installationId: p.installation?.id };
+      return {
+        kind: 'start', owner, repo, issueNumber: p.issue.number, installationId: p.installation?.id,
+        ...(typeof p.issue?.title === 'string' ? { title: p.issue.title } : {}),
+        ...(typeof p.issue?.body === 'string' ? { body: p.issue.body } : {}),
+      };
     case 'issues.closed':
       return { kind: 'cancel', owner, repo, issueNumber: p.issue.number, reason: 'issue closed' };
     case 'pull_request.closed':
