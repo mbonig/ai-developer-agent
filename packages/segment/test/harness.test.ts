@@ -265,6 +265,22 @@ function ccDeps(bare: string, fc: { bin: string }, over: Partial<HarnessDeps> = 
   return h;
 }
 
+test('backend lookup: the looked-up backend wins over the static one', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish');
+  const h = ccDeps(bare, fc, { agentBackend: 'bedrock', getAgentBackend: async () => 'claude-code' });
+  await runSegment(h.d, job());
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  assert.equal(h.ok[0].billing, 'subscription');
+});
+
+test('backend lookup: a failed lookup fails the segment and never falls back to a backend', async () => {
+  const { bare } = remote(); const fc = fakeClaude('finish'); let converseCalls = 0;
+  const h = ccDeps(bare, fc, { getAgentBackend: async () => { throw new Error('ParameterNotFound'); }, converse: async () => { converseCalls++; throw new Error('should not run'); } });
+  await runSegment(h.d, job());
+  assert.equal(h.ok.length, 0); assert.equal(converseCalls, 0);
+  assert.equal(h.bad.length, 1); assert.equal(h.bad[0][0], 'SEGMENT_ERROR'); assert.match(h.bad[0][1], /Could not determine the model backend: ParameterNotFound/);
+});
+
 test('Claude Code backend: runs in a fixed directory, publishes the branch, saves the session, reports subscription billing and API-equivalent cost', async () => {
   const { bare, root } = remote(); const fc = fakeClaude('finish'); let saved: Buffer | undefined;
   const h = ccDeps(bare, fc, { saveClaudeSession: async (_j, b) => { saved = b; } });

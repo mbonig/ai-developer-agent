@@ -243,7 +243,7 @@ The part that does the thinking is replaceable. Everything else (webhooks, the o
 
 ```mermaid
 flowchart LR
-    SEG[Work segment<br/>harness: clone, commit, publish, report] --> B{agentBackend}
+    SEG[Work segment<br/>harness: clone, commit, publish, report] --> B{agent-backend<br/>SSM parameter}
     B -->|"bedrock (default)"| BR["Our tool loop<br/>Claude on Amazon Bedrock<br/>own caching and compaction<br/>billed per token"]
     B -->|claude-code| CC["Claude Code, headless<br/>(claude -p) as the agent user<br/>own context management and subagents<br/>included in a Claude subscription"]
     CC -. "ask_questions / finish<br/>through an MCP server" .-> SEG
@@ -267,17 +267,15 @@ flowchart LR
    aws secretsmanager put-secret-value --secret-id ai-developer-agent/claude-code-oauth-token \
      --secret-string 'THE-TOKEN'
    ```
-3. **Switch and redeploy** the sandbox stack (the setting is baked into the image):
+3. **Switch** by setting the SSM parameter. Every segment reads it when it starts, so there is no redeploy:
    ```bash
-   cd packages/infra
-   npx cdk deploy AgentSandbox --exclusively -c agentBackend=claude-code
+   aws ssm put-parameter --name /ai-developer-agent/agent-backend --type String --overwrite --value claude-code
    ```
-   To make it permanent, set `"agentBackend": "claude-code"` in `packages/infra/cdk.json`.
-4. **Switch back** the same way with `-c agentBackend=bedrock`.
+4. **Switch back** with `--value bedrock`.
+
+The parameter is created by the sandbox stack with the value `bedrock`. Deploys never reset it afterwards. A segment that is already running keeps the backend it started with. The change applies to the next segment, including the next segment of an issue that is already in progress. A value other than `bedrock` or `claude-code`, or an unreadable parameter, fails the segment instead of guessing.
 
 If `claude-code` is selected and the token is still `UNSET`, segments fail with a message saying so. They never fall back to Bedrock, because that would spend money you chose not to spend.
-
-Redeploying while a run is active has the same caveat as any redeploy: see [Operating it](#operating-it).
 
 ### How the Claude Code backend works
 
@@ -465,7 +463,6 @@ Set these as CDK context in `packages/infra/cdk.json` or with `-c key=value`.
 | `githubOrg` | `mbonig` | The only owner whose events are processed |
 | `githubAppId` | none | The GitHub App ID. **Pass it on every deploy of the state stack, or it resets.** |
 | `agentLabel` | `agent` | The label that starts a run |
-| `agentBackend` | `bedrock` | `bedrock` or `claude-code`. See [Choosing the model backend](#choosing-the-model-backend). Redeploy to change it. |
 | `bedrockModelId` | `us.anthropic.claude-sonnet-5` | Model or inference profile ID (Bedrock backend) |
 | `maxTokensPerIssue` | `12000000` | Per-issue token budget |
 | `enableFactory` | `true` | Allow factory mode (still needs the swamp token) |

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { handleMcp, mcpTools } from '../src/mcp-server.ts';
 import { feed, newStreamState, streamUsage, rateLimitedFor, runClaudeSession, type ClaudeRunArgs } from '../src/claude-code.ts';
-import { loadConfig } from '@agent/shared';
+import { loadConfig, parseAgentBackend } from '@agent/shared';
 
 const FAKE = resolve(import.meta.dirname, 'fixtures/fake-claude.mjs');
 
@@ -16,6 +16,13 @@ test('agentBackend: default bedrock, claude-code accepted without a Bedrock mode
   assert.equal(loadConfig({ AGENT_BACKEND: 'claude-code', MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'claude-code');
   assert.throws(() => loadConfig({ MAX_TOKENS_PER_ISSUE: '10' }), /BEDROCK_MODEL_ID/);               // bedrock still needs its model
   assert.throws(() => loadConfig({ AGENT_BACKEND: 'gpt', MAX_TOKENS_PER_ISSUE: '10' }), /AGENT_BACKEND/);
+});
+
+test('parseAgentBackend: accepts the two names (trimmed) and rejects anything else', () => {
+  assert.equal(parseAgentBackend('bedrock', 'p'), 'bedrock');
+  assert.equal(parseAgentBackend(' claude-code\n', 'p'), 'claude-code');
+  assert.throws(() => parseAgentBackend('Claude', '/x/param'), /\/x\/param must be/);
+  assert.throws(() => parseAgentBackend(undefined, 'p'), /got ""/);
 });
 
 // ---- MCP server
