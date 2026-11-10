@@ -1,0 +1,12 @@
+{
+  "app": "node bin/app.ts",
+  "context": {
+    "region": "us-west-2",
+    "githubOrg": "mbonig",
+    "agentLabel": "agent",
+    "bedrockModelId": "us.anthropic.claude-sonnet-5",
+    "maxTokensPerIssue": "16000000",
+    "githubAppId": "5574573",
+    "enableFactory": "true"
+  }
+}

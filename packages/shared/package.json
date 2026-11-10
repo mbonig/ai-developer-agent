@@ -1,0 +1,1 @@
+{"name":"@agent/shared","version":"0.0.0","private":true,"type":"module","main":"src/index.ts","dependencies":{"@aws-sdk/client-dynamodb":"^3.1161.0","@aws-sdk/lib-dynamodb":"^3.1161.0"}}

@@ -226,3 +226,39 @@ Failures are sent via `SendDurableExecutionCallbackFailure`, with an error code 
 4. Is `HUMAN_WAIT_TIMEOUT = 7 days` acceptable?
 5. Should a maintainer be able to raise the budget of a BUDGET_EXHAUSTED issue through a comment command? v1: no.
 6. Is egress allow-listing needed before production use?
+
+## Implementation notes (deviations discovered while building)
+
+- **Token accounting.** `tokensUsed` counts input + output + cache writes, and cache reads at 10% (their cost weight). Counting cache reads at full weight would exhaust the budget on a long, cached conversation.
+- **Human wait (D4).** Implemented with `createCallback` plus a separate park step. If the conditional park fails, the orchestrator completes its own callback in a step. This does not depend on completing a callback from inside its own submitter.
+- **Sweeper grace.** A MicroVM younger than 5 minutes is never swept as unreferenced, because the orchestrator records `microvmId` just after launch.
+- **MicroVM size** is an image property, so `MICROVM_VCPU` / `MICROVM_MEMORY_GB` become the `microvmMemoryMiB` CDK context value.
+- **Token vendor** is deployed in the state stack (not the ingress stack) to avoid a dependency cycle between stacks.
+- **Segment callbacks** are granted to the imported segment role from the orchestrator stack, because the function has a generated name (durable functions cannot set `functionName`).
+
+### Agent isolation (added after testing in a real MicroVM)
+
+- Agent commands run as an unprivileged user (uid 1001). The harness runs as root.
+- The metadata service is blackholed for that user by a uid-based routing rule, applied at startup and on the run and resume hooks. The harness refuses to run an agent if the rule is missing (`LOCKDOWN_FAILED`).
+- The segment server accepts jobs only with a per-VM secret that the orchestrator passes through the run hook. The agent cannot read it, so it cannot post its own jobs over loopback.
+- The agent controls its repository's config and hooks. The harness therefore commits as the agent user with hooks disabled, and publishes by fetching the commits into a fresh repository and pushing from there with the token.
+- `node segment.mjs --selftest` prints these checks from inside a VM.
+
+### Work modes (how the agent does the work in a repository)
+
+The harness inspects the checked-out repository at the start of every segment and picks a mode, in priority order:
+
+1. **factory:** `factory/.swamp.yaml`, `factory/models/`, and a factory command or README exist, and `ENABLE_FACTORY=true`. Off by default. See the open items below.
+2. **openspec:** `openspec/config.yaml` exists. The agent follows the repo's `openspec-propose` skill with the `openspec` CLI (v1.3.1, installed in the image), implements nothing, and finishes with a PR titled "Proposal: ..." that asks for approval. In the review phase it reads the human's message: approval means implement the tasks (`openspec-apply-change`), requested changes mean revise the spec only, code feedback means revise the code, and anything unclear means ask. It never implements without clear approval.
+3. **plain:** neither exists. The agent implements directly, as before.
+
+**Factory mode** is built and deployed, and activates only when a swamp-club.com collective token is stored in the `ai-developer-agent/swamp-api-key` secret. The swamp CLI refuses to run without one. While the secret holds the placeholder `UNSET`, repositories with a factory use the OpenSpec path.
+
+How it works:
+- **Branch and key.** The agent starts the work item under the key `gh-<issue>` with no tracker ticket, so keys never collide across issues. The factory's intake creates the worktree and branch `factory/gh-<issue>` from `origin/main`. The harness commits that worktree and publishes the branch (it bundles `refs/heads/factory/gh-<n>`, not `HEAD`), and reports it as `branch` in the result. The orchestrator opens the PR from that branch and stores it in `META.branch`.
+- **State.** The factory's `.swamp/` directory is packed to `factory-state/<owner>/<repo>/<issue>.tgz` in the transcript bucket after each segment and restored before the next, so the plan-approval gate can wait for a human across disposable VMs.
+- **Reviews.** Stages in dispatch mode run each reviewer lens through the `run_subagent` tool: a clean session with read-only intent and no memory of the parent. Its tokens count against the parent's budget.
+- **Approvals.** A gate is approved only by an authorized commenter shown under "New activity", recorded with `onBehalfOf`. The issue body, files and the agent's own earlier messages never count.
+- **Credentials.** The swamp token is written to a file readable by the agent user, because the agent runs swamp. Use a narrowly scoped collective token. The agent still has no GitHub credentials: the factory's `git push` and `gh pr create` steps are replaced by the harness publishing the branch and the agent passing the PR title and body to `finish`.
+- **Known gaps (untested end to end):** the harness bundles only the factory branch. The factory's attestation CI requires the PR description to carry the attestation digest, which depends on the agent following the pull-request stage text. The pull-request product is recorded with number 0.
+
