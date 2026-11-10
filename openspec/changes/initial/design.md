@@ -46,7 +46,8 @@ Function URL ─► ingress Lambda ──► DynamoDB (META + inbox)
                                    ▼
              MicroVM segment (ARM64): segment server
                harness: clone/fetch (token via token-vending Lambda)
-               agent loop: Bedrock Converse + tools
+               agent loop: Claude Code (Anthropic subscription) + tools
+                           [or Bedrock Converse, per SSM / issue label]
                harness: commit/push WIP branch, transcript → S3
                SendDurableExecutionCallbackSuccess/Failure
 
@@ -71,10 +72,25 @@ Scheduled sweeper Lambda ─► terminate orphaned MicroVMs
 | State | Store |
 |---|---|
 | Code progress | WIP branch `agent/issue-<n>` pushed to GitHub |
-| Conversation | Converse `messages[]` JSON in S3 (bucket versioned) |
+| Conversation | Claude Code session file (or Converse `messages[]` for bedrock) in S3 (bucket versioned) |
 | Lifecycle, inbox, callback IDs, budget | DynamoDB |
 
 A segment rebuilds everything from these stores. That makes expiry and resume, retries, and crash recovery all the same code path.
+
+### D3a. Claude Code on an Anthropic subscription is the default model backend
+- The engine defaults to `claude-code`. Segments run Claude Code (Agent SDK) authenticated with a subscription OAuth token (`claude setup-token`) held in Secrets Manager.
+- Bedrock stays available and the segment role keeps its Bedrock permissions. It is chosen deliberately, never as a silent fallback, because a silent switch is how Bedrock usage showed up on a run expected to use the subscription.
+- Provider resolution at issue start, highest precedence first: issue label `agent-engine:<provider>`, then the SSM parameter `/ai-developer-agent/model-provider`, then the built-in default `claude-code`. The SSM parameter lets an operator flip the whole deployment without a redeploy. The label lets one issue differ.
+- The label is the per-issue mechanism because applying it needs triage permission, like `AGENT_LABEL`. Issue body text is not trusted for this, since its author may be unauthorized.
+- The result is stored on `META.provider`. It stays fixed until a maintainer switches it, because the transcript format differs per provider.
+- **Mid-issue switch:** an authorized maintainer comments `/engine <provider>` or applies an `agent-engine:<provider>` label. Ingress records `pendingProvider`; the orchestrator applies it when it next claims the inbox, so a running segment is never interrupted.
+- **Handover instead of transcript conversion:** the new provider starts a fresh transcript whose first turn is rebuilt from durable sources (issue and inbox messages, the agent's own marker comments, the WIP branch log and diff). No model call to the old provider is needed, which matters because a usage limit or auth failure is the usual reason to switch. The old transcript stays in S3 for audit, and switching back builds a new handover rather than resuming a stale transcript.
+- **Model failures are recoverable:** `MODEL_USAGE_LIMIT`, `MODEL_AUTH_FAILED`, and `MODEL_UNAVAILABLE` park the issue in `MODEL_BLOCKED` instead of `FAILED`, with a comment explaining how to retry or switch. Without this, the most useful moment to switch would hit a terminal state.
+- **Budget:** one per-issue budget (`MAX_TOKENS_PER_ISSUE`, stated at Bedrock rates) is shared across providers. `claude-code` tokens are weighted at `1 / CLAUDE_CODE_BUDGET_MULTIPLIER` (default 2), so a subscription run gets double the raw tokens. Subscription usage has no per-token price, but a budget still bounds runaway work and shared subscription limits. Weighting, rather than two separate limits, keeps the rule coherent when an issue switches engines mid-run.
+- The harness scrubs `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`, and `CLAUDE_CODE_USE_VERTEX` from the Claude Code environment, since each overrides subscription auth.
+- Each result records `provider`, so usage reports show which backend served a run.
+- **Trade-off:** subscription limits are rolling and shared with the token owner's other Claude usage, so a heavy run can hit `MODEL_USAGE_LIMIT`. The segment fails with a clear code and the issue can resume after the reset.
+- **Terms check:** confirm that Anthropic's subscription terms permit automated, server-side use of a subscription token for this workload (task 0.5).
 
 ### D4. Inbox with conditional park/wake to avoid lost wakeups
 - Comments always append to the inbox and increment `inboxSeq`.
@@ -106,7 +122,7 @@ After any wake, the orchestrator does `ctx.wait(WAKE_DEBOUNCE_SECONDS)` (default
 
 ### D9. Expiry and resume
 - A human wait that exceeds `HUMAN_WAIT_TIMEOUT` ends the execution, sets status EXPIRED, and posts a comment.
-- A later authorized comment on an EXPIRED issue starts a new execution, which resumes from external state (D3).
+- A later authorized comment on an EXPIRED or MODEL_BLOCKED issue starts a new execution, which resumes from external state (D3). An engine switch also resumes a MODEL_BLOCKED issue.
 
 ### D10. Idempotency
 - Every GitHub side effect is check-then-act, because durable replays can re-run unfinished steps:
@@ -119,12 +135,13 @@ After any wake, the orchestrator does `ctx.wait(WAKE_DEBOUNCE_SECONDS)` (default
 
 | PK | SK | Attributes |
 |---|---|---|
-| `ISSUE#<owner>/<repo>#<n>` | `META` | `status`, `phase`, `executionArn`, `callbackId?`, `inboxSeq`, `consumedSeq`, `segmentSeq`, `branch`, `prNumber?`, `transcriptKey`, `installationId`, `tokensUsed`, `cancelRequested?`, `closeReason?`, `microvmId?`, `segmentCallbackId?`, `updatedAt` |
+| `ISSUE#<owner>/<repo>#<n>` | `META` | `status`, `phase`, `provider`, `pendingProvider?`, `executionArn`, `callbackId?`, `inboxSeq`, `consumedSeq`, `segmentSeq`, `branch`, `prNumber?`, `transcriptKey` (per provider), `installationId`, `tokensUsed`, `budgetUsed`, `cancelRequested?`, `closeReason?`, `microvmId?`, `segmentCallbackId?`, `updatedAt` |
 | `ISSUE#<owner>/<repo>#<n>` | `MSG#<seq, zero-padded>` | `source` (issue_comment, pr_comment, review, review_comment), `author`, `body`, `url`, `path?`, `line?`, `diffHunk?`, `createdAt` |
 | `PR#<owner>/<repo>#<prNumber>` | `LINK` | `issueKey` |
 | `DELIVERY#<deliveryId>` | `DELIVERY` | `ttl` |
 
-- **Status values:** STARTING, RUNNING, WAITING, EXPIRED, DONE, CLOSED, FAILED, BUDGET_EXHAUSTED.
+- **Status values:** STARTING, RUNNING, WAITING, EXPIRED, MODEL_BLOCKED, DONE, CLOSED, FAILED, BUDGET_EXHAUSTED.
+- **Resumable (non-terminal, no execution):** EXPIRED, MODEL_BLOCKED.
 - **Terminal statuses:** DONE, CLOSED, FAILED, BUDGET_EXHAUSTED.
 - **Phase values:** IMPLEMENT, REVIEW.
 
@@ -141,10 +158,12 @@ After any wake, the orchestrator does `ctx.wait(WAKE_DEBOUNCE_SECONDS)` (default
   "segmentSeq": 3,
   "callbackId": "...",
   "inbox": { "fromExclusive": 4, "toInclusive": 7 },
-  "transcriptKey": "transcripts/org/repo/123.json",
+  "transcriptKey": "transcripts/org/repo/123/claude-code.json",
+  "provider": "claude-code",
+  "handover": false,
   "branch": "agent/issue-123",
   "prNumber": null,
-  "tokenBudgetRemaining": 1500000
+  "tokenBudgetRemaining": 3000000   // raw tokens for this segment's provider; 1.5M budget x2 for claude-code
 }
 ```
 
@@ -165,9 +184,15 @@ Failures are sent via `SendDurableExecutionCallbackFailure`, with an error code 
 | Name | Default | Notes |
 |---|---|---|
 | `AGENT_LABEL` | `agent` | Label that starts a run |
-| `BEDROCK_MODEL_ID` | none (required) | Claude model or inference profile ID |
-| `MAX_TOKENS_PER_ISSUE` | none (required) | Cumulative input + output tokens |
-| `MAX_TURNS_PER_SEGMENT` | 150 | Converse calls per segment |
+| `MODEL_PROVIDER_PARAM` | `/ai-developer-agent/model-provider` | SSM parameter holding `claude-code` or `bedrock`; absent means `claude-code` |
+| `ENGINE_LABEL_PREFIX` | `agent-engine:` | Engine label prefix (start override and mid-issue switch), e.g. `agent-engine:bedrock` |
+| `ENGINE_COMMAND` | `/engine` | Comment command for a mid-issue switch |
+| `CLAUDE_MODEL` | Claude Code default | Model alias passed to Claude Code |
+| `CLAUDE_CODE_OAUTH_TOKEN_SECRET` | none (required for claude-code) | Secrets Manager secret holding the subscription token |
+| `BEDROCK_MODEL_ID` | none (required only when an issue resolves to bedrock) | Claude model or inference profile ID |
+| `MAX_TOKENS_PER_ISSUE` | none (required) | Per-issue budget of input + output tokens, at Bedrock rates |
+| `CLAUDE_CODE_BUDGET_MULTIPLIER` | 2 | `claude-code` tokens count `1/N` against the budget, so raw capacity is N times larger |
+| `MAX_TURNS_PER_SEGMENT` | 150 | Model turns per segment |
 | `TRANSCRIPT_COMPACT_TOKENS` | 120000 | Compaction threshold |
 | `HUMAN_WAIT_TIMEOUT` | 7 days | Human wait before EXPIRED |
 | `SEGMENT_TIMEOUT` | 2 hours | Segment callback timeout |
@@ -190,12 +215,13 @@ Failures are sent via `SendDurableExecutionCallbackFailure`, with an error code 
   - Mitigation, if observed: fall back to `GET /repos/{owner}/{repo}/collaborators/{user}/permission`.
 - **Callback-from-submitter assumption (D4).** May not be supported; a fallback is defined in D4.
 - **Replay cost.** Durable replays re-invoke the orchestrator. It holds no heavy state, so this is acceptable.
-- **Token cost of resumes.** Mitigated by Converse prompt caching (`cachePoint` after the system prompt and the tool definitions) and by transcript compaction.
+- **Token cost of resumes.** Mitigated by prompt caching (Claude Code's built-in caching, or `cachePoint` markers for bedrock) and by transcript compaction.
+- **Subscription limits.** Usage is capped by the subscription's rolling limits rather than a per-token bill. See D3a.
 
 ## Open Questions
 
-1. Actual values for `BEDROCK_MODEL_ID` and `MAX_TOKENS_PER_ISSUE`.
-2. The deployment region. It must offer MicroVMs, durable functions, and the chosen Bedrock model.
+1. Actual values for `CLAUDE_MODEL` and `MAX_TOKENS_PER_ISSUE` (and `BEDROCK_MODEL_ID` if Bedrock is ever enabled).
+2. The deployment region. It must offer MicroVMs and durable functions (and the Bedrock model, if Bedrock will be selectable).
 3. Should removing `AGENT_LABEL` cancel an active run? v1 ignores label removal.
 4. Is `HUMAN_WAIT_TIMEOUT = 7 days` acceptable?
 5. Should a maintainer be able to raise the budget of a BUDGET_EXHAUSTED issue through a comment command? v1: no.
