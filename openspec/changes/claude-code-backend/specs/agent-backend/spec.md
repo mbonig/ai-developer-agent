@@ -3,15 +3,27 @@
 ## ADDED Requirements
 
 ### Requirement: Selectable backend
-The deployment SHALL select the model backend with the setting `agentBackend`, whose values are `bedrock` and `claude-code`. The default SHALL be `bedrock`. Changing the value SHALL require only a redeploy of the sandbox stack.
+The deployment SHALL select the model backend with the setting `agentBackend`, whose values are `bedrock` and `claude-code`. The default SHALL be `claude-code`. Changing the value SHALL require no redeploy: segments read the `/ai-developer-agent/agent-backend` SSM parameter when they start, and an issue may override it for itself.
 
 #### Scenario: Default
 - **WHEN** no value is set
-- **THEN** segments use the Bedrock Converse backend, as before
+- **THEN** segments use the Claude Code backend
+- **AND** no Bedrock call is made
 
 #### Scenario: Switching
-- **WHEN** `agentBackend` is changed to `claude-code` and the sandbox stack is redeployed
-- **THEN** the next segment that starts runs on Claude Code
+- **WHEN** the SSM parameter is changed to `bedrock`
+- **THEN** the next segment that starts runs on the Bedrock Converse backend
+
+### Requirement: Subscription token budget
+The per-issue token budget (`maxTokensPerIssue`) SHALL be stated at Bedrock rates. Tokens used by the Claude Code backend SHALL count `1 / CLAUDE_CODE_BUDGET_MULTIPLIER` (default 2) against it, so a Claude Code issue has the multiplier times the raw tokens.
+
+#### Scenario: Doubled raw budget
+- **WHEN** the budget is 12,000,000 and a Claude Code issue has used 8,000,000 raw tokens
+- **THEN** 4,000,000 count against the budget and the issue may continue
+
+#### Scenario: Switching backends mid-issue
+- **WHEN** an issue that used 8,000,000 raw tokens on Claude Code switches to Bedrock
+- **THEN** its remaining budget is 8,000,000 Bedrock tokens
 
 #### Scenario: Token not configured
 - **WHEN** the backend is `claude-code` and the token secret holds its placeholder

@@ -60,7 +60,7 @@ test('only the issue closing cancels; a PR closing or merging is a prFinished', 
 });
 
 test('config validation', () => {
-  assert.throws(() => loadConfig({}), /BEDROCK_MODEL_ID/);
+  assert.throws(() => loadConfig({ AGENT_BACKEND: 'bedrock' }), /BEDROCK_MODEL_ID/);
   assert.throws(() => loadConfig({ BEDROCK_MODEL_ID: 'm' }), /MAX_TOKENS_PER_ISSUE/);
   assert.throws(() => loadConfig({ BEDROCK_MODEL_ID: 'm', MAX_TOKENS_PER_ISSUE: '-1' }), /positive integer/);
   const c = loadConfig({ BEDROCK_MODEL_ID: 'm', MAX_TOKENS_PER_ISSUE: '100' });

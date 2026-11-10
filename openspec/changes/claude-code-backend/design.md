@@ -7,7 +7,9 @@ Today a segment is: harness (root) clones, rehydrates, runs our own Converse too
 ## Decisions
 
 ### D1. One switch, in the deployment
-`agentBackend` is a CDK context value (`bedrock` or `claude-code`), passed to the image as `AGENT_BACKEND`. Switching means changing the value and redeploying the sandbox stack. The default is `bedrock`, so existing deployments do not change.
+`agentBackend` is a CDK context value (`bedrock` or `claude-code`), passed to the image as `AGENT_BACKEND`. Switching means changing the value and redeploying the sandbox stack. The default is `claude-code`; the SSM parameter (created with that value, never reset by deploys) overrides it per deployment, so existing deployments keep their current value.
+
+The per-issue token budget is stated at Bedrock rates. Claude Code tokens count `1 / CLAUDE_CODE_BUDGET_MULTIPLIER` (default 2) against it, because subscription usage has no per-token price. The harness hands Claude Code the remaining budget times the multiplier and reports the tokens used divided by the multiplier, so the orchestrator keeps one budget in Bedrock-equivalent units.
 
 If `claude-code` is selected but the token secret still holds its placeholder, the segment **fails with a clear message**. It never falls back to Bedrock silently, because that would spend money the user chose not to spend.
 

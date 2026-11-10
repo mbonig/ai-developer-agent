@@ -16,7 +16,7 @@ import { firstTurn, followUpTurn, systemPrompt } from './prompts.ts';
 export interface IssueInfo { title: string; body: string; author: string }
 
 export interface HarnessDeps {
-  config: Pick<Config, 'bedrockModelId' | 'maxTurnsPerSegment' | 'transcriptCompactTokens' | 'runCommandTimeoutSeconds' | 'toolOutputMaxBytes'>;
+  config: Pick<Config, 'bedrockModelId' | 'maxTurnsPerSegment' | 'transcriptCompactTokens' | 'runCommandTimeoutSeconds' | 'toolOutputMaxBytes'> & Partial<Pick<Config, 'claudeCodeBudgetMultiplier'>>;
   getToken(installationId: number, repo: string): Promise<string>;
   getIssue(token: string, owner: string, repo: string, number: number): Promise<IssueInfo>;
   loadTranscript(key: string): Promise<Message[] | undefined>;
@@ -74,7 +74,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
   let backend: AgentBackend;
   try {
     // The issue's own request (if any) overrides the deployment default, and needs no SSM lookup.
-    backend = job.modelOverride?.backend ?? (d.getAgentBackend ? await d.getAgentBackend() : d.agentBackend ?? 'bedrock');
+    backend = job.modelOverride?.backend ?? (d.getAgentBackend ? await d.getAgentBackend() : d.agentBackend ?? 'claude-code');
   } catch (e) {
     // Never guess: running the wrong backend could spend money the operator chose not to.
     log('backend lookup failed', { message: (e as Error).message });
@@ -164,6 +164,9 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     let outcome: import('@agent/shared').SegmentOutcome; let tokensUsed: number; let usage: Usage; let cost: number | undefined; let billing: 'bedrock' | 'subscription'; let transcript: Message[] | undefined;
 
     if (backend === 'claude-code') {
+      // Subscription tokens count 1/mult against the per-issue budget, so the budget handed to Claude Code is mult times the remaining
+      // budget and the tokens reported back are divided by mult. The orchestrator then keeps one budget in Bedrock-equivalent units.
+      const mult = d.config.claudeCodeBudgetMultiplier ?? 2;
       const issue = hadSession ? undefined : await d.getIssue(await freshToken(), job.owner, job.repo, job.issueNumber);
       const prompt = issue
         ? firstTurn({ owner: job.owner, repo: job.repo, number: job.issueNumber, ...issue, baseBranch: base }, inbox)
@@ -171,13 +174,13 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
       const res = await runClaudeSession({
         workDir: work, configDir, prompt, systemPrompt: systemPrompt(job.phase, branch, `${job.owner}/${job.repo}`, modeInfo.mode, 'claude-code'),
         phase: job.phase, sessionId: sessionIdFor(job.issueKey), resume: hadSession, token: claudeToken!,
-        maxTurns: d.config.maxTurnsPerSegment, tokenBudget: job.tokenBudgetRemaining, timeoutMs: d.claudeTimeoutMs ?? 100 * 60 * 1000,
+        maxTurns: d.config.maxTurnsPerSegment, tokenBudget: job.tokenBudgetRemaining * mult, timeoutMs: d.claudeTimeoutMs ?? 100 * 60 * 1000,
         outcomeFile: join(configDir, 'outcome.json'), mcpConfigPath: join(configDir, 'mcp.json'),
         mcp: d.mcpCommand ?? { command: process.execPath, args: [process.argv[1] ?? '', '--mcp-server'] },
         runAs, claudeBin: d.claudeBin, model: modelId, log,
         extraEnv: agentEnv?.SWAMP_API_KEY_FILE ? { SWAMP_API_KEY_FILE: agentEnv.SWAMP_API_KEY_FILE } : undefined,
       });
-      outcome = res.outcome; tokensUsed = res.tokensUsed; usage = res.usage; cost = res.costUsd; billing = 'subscription';
+      outcome = res.outcome; tokensUsed = Math.ceil(res.tokensUsed / mult); usage = res.usage; cost = res.costUsd; billing = 'subscription';
     } else {
       const activeModelId = modelId ?? d.config.bedrockModelId;
       let messages = (await d.loadTranscript(job.transcriptKey)) ?? [];

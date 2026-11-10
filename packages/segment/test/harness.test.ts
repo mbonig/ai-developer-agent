@@ -35,6 +35,7 @@ function remoteWith(files: Record<string, string>) {
 function deps(bare: string, script: Array<() => ConverseCommandOutput>, over: Partial<HarnessDeps> = {}) {
   const store = new Map<string, Message[]>(); const ok: SegmentResult[] = []; const bad: Array<[string, string]> = []; const prompts: string[] = []; let tokens = 0;
   const d: HarnessDeps = {
+    agentBackend: 'bedrock', // the harness defaults to claude-code; these tests drive the Bedrock loop unless a test says otherwise
     config: { bedrockModelId: 'm', maxTurnsPerSegment: 10, transcriptCompactTokens: 100000, runCommandTimeoutSeconds: 5, toolOutputMaxBytes: 2000 },
     getToken: async () => `tok${++tokens}`,
     getIssue: async () => ({ title: 'Add greeting', body: 'Please add hello.txt', author: 'maintainer' }),
@@ -312,6 +313,17 @@ test('backend lookup: a failed lookup fails the segment and never falls back to 
   assert.equal(h.bad.length, 1); assert.equal(h.bad[0][0], 'SEGMENT_ERROR'); assert.match(h.bad[0][1], /Could not determine the model backend: ParameterNotFound/);
 });
 
+test('Claude Code backend: the issue budget counts subscription tokens at 1/multiplier', async () => {
+  const { bare } = remote();
+  for (const [mult, expected] of [[2, 3700], [4, 1850], [1, 7400]] as const) {
+    const fc = fakeClaude('finish');
+    const h = ccDeps(bare, fc); h.d.config.claudeCodeBudgetMultiplier = mult;
+    await runSegment(h.d, job({ issueKey: `ISSUE#o/r#${70 + mult}`, branch: `agent/issue-${70 + mult}` }));
+    assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+    assert.equal(h.ok[0].tokensUsed, expected);
+  }
+});
+
 test('Claude Code backend: runs in a fixed directory, publishes the branch, saves the session, reports subscription billing and API-equivalent cost', async () => {
   const { bare, root } = remote(); const fc = fakeClaude('finish'); let saved: Buffer | undefined;
   const h = ccDeps(bare, fc, { saveClaudeSession: async (_j, b) => { saved = b; } });
@@ -319,7 +331,7 @@ test('Claude Code backend: runs in a fixed directory, publishes the branch, save
   assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
   const r = h.ok[0];
   assert.equal(r.type, 'done'); assert.equal(r.billing, 'subscription'); assert.equal(r.costUsd, 0.42);
-  assert.deepEqual(r.usage, { input: 100, output: 300, cacheRead: 50000, cacheWrite: 2000 }); assert.equal(r.tokensUsed, 7400);
+  assert.deepEqual(r.usage, { input: 100, output: 300, cacheRead: 50000, cacheWrite: 2000 }); assert.equal(r.tokensUsed, 3700); // 7400 raw tokens, counted at half weight against the issue budget
   assert.equal(h.prompts.length, 0, 'Bedrock is never called');
   const check = join(root, 'check'); execFileSync('git', ['clone', '-q', '-b', 'agent/issue-7', bare, check]);
   assert.equal(readFileSync(join(check, 'feature.txt'), 'utf8'), 'built by the fake\n');           // the harness committed what the agent wrote
