@@ -249,22 +249,22 @@ The part that does the thinking is replaceable. Everything else (webhooks, the o
 ```mermaid
 flowchart LR
     SEG[Work segment<br/>harness: clone, commit, publish, report] --> B{agent-backend<br/>SSM parameter}
-    B -->|"bedrock (default)"| BR["Our tool loop<br/>Claude on Amazon Bedrock<br/>own caching and compaction<br/>billed per token"]
-    B -->|claude-code| CC["Claude Code, headless<br/>(claude -p) as the agent user<br/>own context management and subagents<br/>included in a Claude subscription"]
+    B -->|bedrock| BR["Our tool loop<br/>Claude on Amazon Bedrock<br/>own caching and compaction<br/>billed per token"]
+    B -->|"claude-code (default)"| CC["Claude Code, headless<br/>(claude -p) as the agent user<br/>own context management and subagents<br/>included in a Claude subscription"]
     CC -. "ask_questions / finish<br/>through an MCP server" .-> SEG
 ```
 
-| | `bedrock` (default) | `claude-code` |
+| | `bedrock` | `claude-code` (default) |
 |---|---|---|
 | Who runs the agent loop | This project's loop over the Bedrock Converse API | Claude Code (`claude -p`) |
 | Who pays | AWS, per token | Your Claude subscription, within its usage windows |
 | Context and compaction | Our own prompt caching and transcript compaction | Claude Code's own, with sessions resumed across segments |
 | Subagents and reviewers | The `run_subagent` tool | Claude Code's own subagent tool |
 | Repo skills and `CLAUDE.md` | Read by the agent when told to | Loaded natively |
-| When a limit is hit | Per-issue token budget, turn limit | Same budget and turn limit, plus the subscription's 5-hour and weekly windows: the run waits for the reset |
+| When a limit is hit | Per-issue token budget, turn limit | Same turn limit and per-issue budget (counted at half weight, so twice the raw tokens), plus the subscription's 5-hour and weekly windows: the run waits for the reset |
 | PR cost section | Dollars per session | "Included in the subscription", with the API-equivalent value shown for scale |
 
-### Switching to Claude Code
+### Using Claude Code (the default)
 
 1. **Get a token** on a machine where you are signed in to Claude Code with your subscription: run `claude setup-token` and copy the long-lived token it prints.
 2. **Store it** in the secret the stack created. It holds the placeholder `UNSET` until you do:
@@ -272,15 +272,17 @@ flowchart LR
    aws secretsmanager put-secret-value --secret-id ai-developer-agent/claude-code-oauth-token \
      --secret-string 'THE-TOKEN'
    ```
-3. **Switch** by setting the SSM parameter. Every segment reads it when it starts, so there is no redeploy:
+3. **Select it** by setting the SSM parameter. New deployments start on `claude-code` already. An older deployment whose parameter still says `bedrock` needs this once. Every segment reads it when it starts, so there is no redeploy:
    ```bash
    aws ssm put-parameter --name /ai-developer-agent/agent-backend --type String --overwrite --value claude-code
    ```
-4. **Switch back** with `--value bedrock`.
+4. **Use Bedrock instead** with `--value bedrock`, or ask for it in a single issue (see below).
 
-The parameter is created by the sandbox stack with the value `bedrock`. Deploys never reset it afterwards. A segment that is already running keeps the backend it started with. The change applies to the next segment, including the next segment of an issue that is already in progress. A value other than `bedrock` or `claude-code`, or an unreadable parameter, fails the segment instead of guessing.
+The parameter is created by the sandbox stack with the value `claude-code`. Deploys never reset it afterwards, so an existing deployment keeps whatever value it has. A segment that is already running keeps the backend it started with. The change applies to the next segment, including the next segment of an issue that is already in progress. A value other than `bedrock` or `claude-code`, or an unreadable parameter, fails the segment instead of guessing.
 
 If `claude-code` is selected and the token is still `UNSET`, segments fail with a message saying so. They never fall back to Bedrock, because that would spend money you chose not to spend.
+
+**Token budget.** `maxTokensPerIssue` is stated at Bedrock rates. Claude Code runs on a subscription rather than per-token billing, so its tokens count at half weight against that budget (`CLAUDE_CODE_BUDGET_MULTIPLIER`, default 2). A Claude Code issue gets twice the raw tokens. After a switch mid-issue, the budget used so far carries over in these Bedrock-equivalent units.
 
 ### How the Claude Code backend works
 

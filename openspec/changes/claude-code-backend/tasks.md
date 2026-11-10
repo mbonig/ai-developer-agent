@@ -1,7 +1,7 @@
 # Tasks: claude-code-backend
 
 ## 1. Configuration and switch
-- [x] 1.1 Add `agentBackend` to config (`AGENT_BACKEND`), validated, default `bedrock`.
+- [x] 1.1 Add `agentBackend` to config (`AGENT_BACKEND`), validated, default `claude-code`.
 - [x] 1.2 CDK: `agentBackend` context, passed to the image; new secret `ai-developer-agent/claude-code-oauth-token` (placeholder `UNSET`) readable by the segment role.
 - [x] 1.3 Image: install the Claude Code CLI (pinned) and create `/work` for the agent user.
 
@@ -31,5 +31,6 @@
 
 ## 6. Docs and rollout
 - [x] 6.1 README: choosing the backend, getting and storing the token, switching and redeploying, limits and risks.
-- [x] 6.2 Deploy with `bedrock` as the default and verify the CLI in a real VM.
+- [x] 6.2 Deploy and verify the CLI in a real VM.
+- [x] 6.3 Default to `claude-code`; count Claude Code tokens at `1/CLAUDE_CODE_BUDGET_MULTIPLIER` (default 2) against the issue budget.
 - [ ] 6.3 With a real token: one supervised issue on `claude-code`, confirm resume, scrub and MCP behavior, record findings in the design.

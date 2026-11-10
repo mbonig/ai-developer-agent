@@ -13,7 +13,7 @@ let secretCache: string | undefined;
 // Only used as the default when a comment asks for a model but not a backend. The deployment's actual, possibly
 // per-segment, choice (the AGENT_BACKEND_PARAM SSM parameter) is read where the work actually runs.
 function defaultBackend(): AgentBackend {
-  try { return parseAgentBackend(process.env.AGENT_BACKEND || 'bedrock', 'AGENT_BACKEND'); } catch { return 'bedrock'; }
+  try { return parseAgentBackend(process.env.AGENT_BACKEND || 'claude-code', 'AGENT_BACKEND'); } catch { return 'claude-code'; }
 }
 
 // The webhook secret is read by the function at runtime (the role is granted read on this one secret only).

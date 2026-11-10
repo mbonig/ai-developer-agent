@@ -13,7 +13,7 @@ The goal is a **switch**: the same orchestrator, sandbox, GitHub handling and wo
 
 ## What Changes
 
-- Add a deployment setting `agentBackend` with values `bedrock` (the default, today's behavior) and `claude-code`.
+- Add a deployment setting `agentBackend` with values `claude-code` (the default) and `bedrock`.
 - Add a Claude Code backend. Each work segment runs `claude -p` headless, as the existing unprivileged agent user inside the existing MicroVM sandbox, authenticated with a long-lived subscription token from `claude setup-token`.
 - Claude Code's sessions persist across segments through S3 and `--resume`, so a conversation survives the disposable VMs.
 - The segment's outcomes (`ask_questions`, `finish`) reach the harness through a small MCP server that the harness provides to Claude Code.
@@ -42,5 +42,5 @@ None. The existing `agent-loop`, `work-segment` and `orchestration` requirements
 
 - Choosing the backend per repository or per issue. It is one setting for the deployment.
 - Mixing backends within one issue.
-- Replacing the Bedrock backend. It stays the default.
+- Removing the Bedrock backend. It stays selectable.
 - Using an Anthropic API key. Only the subscription token is supported here.

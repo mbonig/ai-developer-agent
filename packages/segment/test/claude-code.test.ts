@@ -11,10 +11,13 @@ import { loadConfig, parseAgentBackend } from '@agent/shared';
 const FAKE = resolve(import.meta.dirname, 'fixtures/fake-claude.mjs');
 
 // ---- config
-test('agentBackend: default bedrock, claude-code accepted without a Bedrock model, anything else rejected', () => {
-  assert.equal(loadConfig({ BEDROCK_MODEL_ID: 'm', MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'bedrock');
+test('agentBackend: default claude-code, bedrock and claude-code accepted without a Bedrock model, anything else rejected', () => {
+  assert.equal(loadConfig({ BEDROCK_MODEL_ID: 'm', MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'claude-code');
+  assert.equal(loadConfig({ MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'claude-code');
+  assert.equal(loadConfig({ AGENT_BACKEND: 'bedrock', BEDROCK_MODEL_ID: 'm', MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'bedrock');
+  assert.equal(loadConfig({ MAX_TOKENS_PER_ISSUE: '10' }).claudeCodeBudgetMultiplier, 2);
   assert.equal(loadConfig({ AGENT_BACKEND: 'claude-code', MAX_TOKENS_PER_ISSUE: '10' }).agentBackend, 'claude-code');
-  assert.throws(() => loadConfig({ MAX_TOKENS_PER_ISSUE: '10' }), /BEDROCK_MODEL_ID/);               // bedrock still needs its model
+  assert.throws(() => loadConfig({ AGENT_BACKEND: 'bedrock', MAX_TOKENS_PER_ISSUE: '10' }), /BEDROCK_MODEL_ID/);             // bedrock still needs its model
   assert.throws(() => loadConfig({ AGENT_BACKEND: 'gpt', MAX_TOKENS_PER_ISSUE: '10' }), /AGENT_BACKEND/);
 });
 

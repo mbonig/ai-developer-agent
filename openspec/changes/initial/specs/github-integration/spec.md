@@ -74,46 +74,8 @@ The ingress function SHALL start an agent run when an `issues.labeled` event add
 - **THEN** no new execution is started
 
 #### Scenario: Other label applied
-- **WHEN** a label other than `AGENT_LABEL` or an `agent-engine:` label is applied
+- **WHEN** a label other than `AGENT_LABEL` is applied
 - **THEN** the event is ignored
-
-### Requirement: Engine switch
-An authorized maintainer SHALL be able to switch the model provider of a tracked, non-terminal issue by either:
-- a comment on the issue or its linked PR containing a line `/engine claude-code` or `/engine bedrock`
-- applying a label `agent-engine:claude-code` or `agent-engine:bedrock` to the issue
-
-Comment commands SHALL be honored only when the author passes the same authorization as any other wake (`author_association` in OWNER, MEMBER, or COLLABORATOR, and not a bot). Label events need no extra check, since applying a label requires triage permission.
-
-Ingress SHALL record the request as `pendingProvider` on `META`. If several requests arrive before the next segment, the latest one wins. A command comment SHALL also be appended to the inbox like any other comment. A label-only switch SHALL NOT wake a `WAITING` issue, but SHALL resume an issue that is `MODEL_BLOCKED`.
-
-Ingress SHALL reject, with a comment and no state change:
-- an unknown provider name
-- `bedrock` when `BEDROCK_MODEL_ID` is not configured
-
-A request for the provider already in use SHALL be a no-op.
-
-#### Scenario: Maintainer comments a command
-- **WHEN** a collaborator comments `/engine bedrock` on a `WAITING` issue running on `claude-code`
-- **THEN** `pendingProvider=bedrock` is recorded
-- **AND** the comment is appended to the inbox and wakes the issue
-
-#### Scenario: Outside contributor tries to switch
-- **WHEN** a user with `author_association` `CONTRIBUTOR` or `NONE` comments `/engine bedrock`
-- **THEN** nothing changes
-
-#### Scenario: Label switch on a blocked issue
-- **WHEN** the label `agent-engine:bedrock` is applied to a `MODEL_BLOCKED` issue
-- **THEN** `pendingProvider=bedrock` is recorded
-- **AND** the issue resumes
-
-#### Scenario: Unknown provider
-- **WHEN** a maintainer comments `/engine gpt`
-- **THEN** the agent replies with the valid values
-- **AND** `pendingProvider` is unchanged
-
-#### Scenario: Switch on a terminal issue
-- **WHEN** a switch is requested for an issue with status `DONE`
-- **THEN** it is ignored
 
 ### Requirement: Event routing
 The ingress function SHALL route events to the issue state record as follows:
@@ -123,7 +85,6 @@ The ingress function SHALL route events to the issue state record as follows:
 - `pull_request_review_comment.created` → the linked issue
 - `pull_request.closed` → the linked issue
 - `issues.closed` → that issue
-- `issues.labeled` with an `agent-engine:` label on a tracked issue → engine switch
 
 Events for issues or PRs with no state record SHALL be ignored.
 

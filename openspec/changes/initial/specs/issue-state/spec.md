@@ -10,9 +10,7 @@ The item SHALL hold:
 - `executionArn`, `callbackId`
 - `inboxSeq`, `consumedSeq`, `segmentSeq`
 - `branch`, `prNumber`, `transcriptKey`
-- `installationId`, `tokensUsed` (raw tokens), `budgetUsed` (provider-weighted tokens)
-- `provider` (`claude-code` or `bedrock`), set at start and changed only by an engine switch
-- `pendingProvider`, a requested switch not yet applied
+- `installationId`, `tokensUsed`
 - `microvmId`, `segmentCallbackId`
 - `updatedAt`
 
@@ -20,9 +18,9 @@ The item SHALL hold:
 - **WHEN** a run starts for `org/repo#123`
 - **THEN** a `META` item exists with:
   - `status=STARTING`, `phase=IMPLEMENT`
-  - `inboxSeq=0`, `consumedSeq=0`, `segmentSeq=0`, `tokensUsed=0`, `budgetUsed=0`
+  - `inboxSeq=0`, `consumedSeq=0`, `segmentSeq=0`, `tokensUsed=0`
   - `branch=agent/issue-123`
-  - `transcriptKey=transcripts/org/repo/123/<provider>.json`
+  - `transcriptKey=transcripts/org/repo/123.json`
 
 #### Scenario: Concurrent start attempts
 - **WHEN** two start attempts for the same issue race
@@ -35,7 +33,6 @@ The item SHALL hold:
 - `RUNNING`
 - `WAITING`
 - `EXPIRED`
-- `MODEL_BLOCKED`
 - `DONE`
 - `CLOSED`
 - `FAILED`
@@ -44,8 +41,6 @@ The item SHALL hold:
 `phase` SHALL be `IMPLEMENT` or `REVIEW`.
 
 `DONE`, `CLOSED`, `FAILED`, and `BUDGET_EXHAUSTED` SHALL be terminal: no execution runs, and comments are not queued.
-
-`EXPIRED` and `MODEL_BLOCKED` SHALL be non-terminal and resumable: no execution runs, but comments are queued and an authorized comment or an engine switch starts a new execution.
 
 #### Scenario: Comment on a terminal issue
 - **WHEN** an authorized comment arrives for an issue with status `DONE`
@@ -104,18 +99,6 @@ After appending a message, ingress SHALL attempt a conditional transition `WAITI
 - **WHEN** two comments are appended concurrently while `status=WAITING`
 - **THEN** exactly one ingress invocation sends `SendDurableExecutionCallbackSuccess`
 - **AND** both comments are in the inbox
-
-### Requirement: Pending provider switch
-Ingress SHALL set `pendingProvider` with a plain update. The orchestrator SHALL apply it in a durable step when it claims the inbox for a segment, by writing `provider=pendingProvider`, removing `pendingProvider`, and updating `transcriptKey`, conditional on `pendingProvider` still holding the observed value.
-
-#### Scenario: Switch requested twice before the next segment
-- **WHEN** `/engine bedrock` and then `/engine claude-code` arrive while a segment runs
-- **THEN** the next segment starts with `provider=claude-code`
-
-#### Scenario: Step replayed
-- **WHEN** a durable replay re-runs the apply step after it succeeded
-- **THEN** the conditional write fails harmlessly
-- **AND** `provider` is unchanged
 
 ### Requirement: PR link
 When the agent opens a PR, the system SHALL write a `LINK` item `PK=PR#<owner>/<repo>#<prNumber>` that references the issue key, and SHALL set `prNumber` on `META`.

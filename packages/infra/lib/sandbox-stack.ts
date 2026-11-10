@@ -59,7 +59,7 @@ export class SandboxStack extends Stack {
     // The value is fixed in the template, so CloudFormation only writes it when the parameter is first created. Later changes made
     // with `aws ssm put-parameter` are not reverted by a deploy.
     const backendParam = new ssm.StringParameter(this, 'AgentBackend', {
-      parameterName: AGENT_BACKEND_PARAM, stringValue: 'bedrock',
+      parameterName: AGENT_BACKEND_PARAM, stringValue: 'claude-code',
       description: 'Model backend for work segments: "bedrock" or "claude-code". Read at the start of every segment.',
     });
     backendParam.grantRead(this.segmentRole);

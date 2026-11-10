@@ -21,6 +21,8 @@ export interface Config {
   agentLabel: string;
   bedrockModelId: string;
   maxTokensPerIssue: number;
+  /** Claude Code runs on a subscription, so its tokens count 1/N against maxTokensPerIssue (N times the raw tokens). Bedrock tokens count in full. */
+  claudeCodeBudgetMultiplier: number;
   maxTurnsPerSegment: number;
   transcriptCompactTokens: number;
   humanWaitTimeoutSeconds: number;
@@ -49,7 +51,7 @@ function int(env: Env, name: string, def?: number): number {
 }
 
 export function loadConfig(env: Env = process.env): Config {
-  const backend = parseAgentBackend(env.AGENT_BACKEND || 'bedrock', 'AGENT_BACKEND');
+  const backend = parseAgentBackend(env.AGENT_BACKEND || 'claude-code', 'AGENT_BACKEND');
   // The Bedrock model id is only needed by the Bedrock backend.
   const modelId = env.BEDROCK_MODEL_ID || (backend === 'claude-code' ? 'claude-code' : '');
   if (!modelId) throw new Error('Missing required config BEDROCK_MODEL_ID');
@@ -59,6 +61,7 @@ export function loadConfig(env: Env = process.env): Config {
     agentLabel: env.AGENT_LABEL || 'agent',
     bedrockModelId: modelId,
     maxTokensPerIssue: int(env, 'MAX_TOKENS_PER_ISSUE'),
+    claudeCodeBudgetMultiplier: int(env, 'CLAUDE_CODE_BUDGET_MULTIPLIER', 2),
     maxTurnsPerSegment: int(env, 'MAX_TURNS_PER_SEGMENT', 150),
     transcriptCompactTokens: int(env, 'TRANSCRIPT_COMPACT_TOKENS', 120000),
     humanWaitTimeoutSeconds: int(env, 'HUMAN_WAIT_TIMEOUT_SECONDS', 7 * 86400),
