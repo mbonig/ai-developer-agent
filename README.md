@@ -236,7 +236,8 @@ flowchart LR
 **Factory mode.** If the repository contains a swamp software factory (`factory/`, built on `@swamp/stagecraft`), the agent drives it: plan, adversarial plan review, a human **plan-approval** gate, implement, verify, three code reviewers (performance, security, architecture), then an attested pull request. The agent works around the pieces that need credentials it deliberately does not have:
 
 - It starts each work item under the key `gh-<issue>`, so keys cannot collide across issues.
-- The factory's branch `factory/gh-<issue>` is committed and published by the harness, not by the agent.
+- The factory's branch `factory/gh-<issue>` is committed and published by the harness, not by the agent. If the factory names its branch differently (for example by following a key rule in the repository) and there is exactly one such `factory/` branch with commits, the harness publishes that one instead and keeps using it.
+- When a session finishes with nothing to propose, the agent's comment on the issue says why: what the harness found (no files changed, or no factory branch), and the agent's own finishing summary.
 - The factory's saved state moves through S3 between segments, which is how the approval gate can wait days.
 - An approval only counts if an authorized commenter says it in a comment the agent was shown. Words in the issue body, in files, or in the agent's own earlier messages never count. The agent never approves a gate on its own.
 

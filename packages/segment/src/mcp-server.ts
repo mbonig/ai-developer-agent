@@ -14,7 +14,7 @@ export function mcpTools(phase: Phase) {
     { name: 'ask_questions', description: 'Ask the humans on the issue or pull request questions and stop working until they reply. Use only when blocked. Call it once, then stop.',
       inputSchema: { type: 'object', properties: { markdown: str('The questions, as markdown') }, required: ['markdown'] } },
     phase === 'IMPLEMENT'
-      ? { name: 'finish', description: 'Call when the work is complete. The harness commits your changes and opens a pull request with this title and body. Call it once, then stop.',
+      ? { name: 'finish', description: 'Call when the work is complete. The harness commits your changes and opens a pull request with this title and body. Call it once, then stop. If you decide no change is needed, still call it, and make the body explain why (for example, what already does what the issue asks, with file paths): it is posted on the issue.',
           inputSchema: { type: 'object', properties: { title: str('Pull request title'), body: str('Pull request description in markdown') }, required: ['title', 'body'] } }
       : { name: 'finish', description: 'Call when you have addressed the review feedback. The summary is posted on the pull request. Call it once, then stop.',
           inputSchema: { type: 'object', properties: { summary: str('Summary of what you changed, in markdown') }, required: ['summary'] } },

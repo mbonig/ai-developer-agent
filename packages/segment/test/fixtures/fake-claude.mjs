@@ -37,6 +37,12 @@ switch (scenario) {
     writeFileSync(join(process.cwd(), 'feature.txt'), 'built by the fake\n');
     outcome('finish', phase === 'IMPLEMENT' ? { title: 'Add feature', body: 'Does it' } : { summary: 'Renamed things' }); result(); break;
   }
+  case 'swamp': { // runs swamp the way Claude Code's scrubbed Bash would: without SWAMP_API_KEY_FILE in the environment
+    const { execFileSync } = await import('node:child_process');
+    const env = { ...process.env }; delete env.SWAMP_API_KEY_FILE;
+    writeFileSync(join(process.cwd(), 'swamp-out.txt'), execFileSync('swamp', ['whoami'], { env, encoding: 'utf8' }));
+    outcome('ask_questions', { markdown: 'swamp ran' }); result(); break;
+  }
   case 'max_turns': result({ subtype: 'error_max_turns', is_error: true, terminal_reason: 'max_turns', result: '' }); break;
   case 'rate_limited': {
     emit({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 900, rateLimitType: 'five_hour' } });

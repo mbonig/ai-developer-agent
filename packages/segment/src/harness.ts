@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { chmod, chown, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -120,6 +121,8 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     let modeInfo: ReturnType<typeof detectMode>;
     let swampKey: string | undefined;
     let branch = job.branch;
+    /** Where main-checkout edits go in factory mode, when the factory itself could not be used. */
+    const fallbackBranch = job.branch.startsWith('factory/') ? undefined : job.branch;
     try {
       await g.cloneRepo(remoteUrl, work, token);
       swampKey = d.enableFactory && d.getSwampKey ? await d.getSwampKey() : undefined;
@@ -130,6 +133,8 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
         // The factory creates its own worktree and branch factory/<key> from origin/main. Resume it if an earlier segment pushed it.
         branch = factoryBranch(job);
         if (await g.remoteHasBranch(work, branch, await freshToken())) await g.fetchBranchLocal(work, branch, await freshToken());
+        // When the factory cannot run, the agent falls back to editing the main checkout. Earlier fallback work lives on the agent branch.
+        if (fallbackBranch && await g.remoteHasBranch(work, fallbackBranch, await freshToken())) await g.checkoutBranch(work, fallbackBranch, await freshToken());
       } else {
         await g.checkoutBranch(work, branch, await freshToken());
       }
@@ -142,13 +147,19 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
       if (saved) await unpackFactoryState(factoryDir, saved);
     }
     const runAs = agentRunAs();
-    let agentEnv: Record<string, string | undefined> | undefined;
+    let agentEnv: Record<string, string | undefined> | undefined; let swampPath: string | undefined;
     if (modeInfo.mode === 'factory' && swampKey) {
       // swamp reads its token from a file. It is readable by the agent user, because the agent runs swamp.
       const keyFile = join(dir, 'swamp-api-key');
       await writeFile(keyFile, swampKey, { mode: 0o400 });
       if (runAs) await chown(keyFile, runAs.uid, runAs.gid);
       agentEnv = { ...process.env, SWAMP_API_KEY_FILE: keyFile };
+      // Claude Code scrubs credential-looking variables (SWAMP_API_KEY_FILE among them) from the commands it runs, so swamp never saw the key.
+      // A `swamp` wrapper first on PATH sets the variable itself, whatever the agent's environment holds.
+      const real = (process.env.PATH ?? '').split(':').map((p) => join(p, 'swamp')).find((p) => existsSync(p)) ?? '/usr/local/bin/swamp';
+      await mkdir(join(dir, 'bin'), { recursive: true });
+      await writeFile(join(dir, 'bin', 'swamp'), `#!/bin/sh\nSWAMP_API_KEY_FILE='${keyFile}' exec '${real}' "$@"\n`, { mode: 0o755 });
+      swampPath = `${join(dir, 'bin')}:${process.env.PATH ?? ''}`;
     }
     const configDir = join(dir, 'claude-config');
     let hadSession = false;
@@ -178,7 +189,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
         outcomeFile: join(configDir, 'outcome.json'), mcpConfigPath: join(configDir, 'mcp.json'),
         mcp: d.mcpCommand ?? { command: process.execPath, args: [process.argv[1] ?? '', '--mcp-server'] },
         runAs, claudeBin: d.claudeBin, model: modelId, log,
-        extraEnv: agentEnv?.SWAMP_API_KEY_FILE ? { SWAMP_API_KEY_FILE: agentEnv.SWAMP_API_KEY_FILE } : undefined,
+        extraEnv: agentEnv?.SWAMP_API_KEY_FILE ? { SWAMP_API_KEY_FILE: agentEnv.SWAMP_API_KEY_FILE, ...(swampPath ? { PATH: swampPath } : {}) } : undefined,
       });
       outcome = res.outcome; tokensUsed = Math.ceil(res.tokensUsed / mult); usage = res.usage; cost = res.costUsd; billing = 'subscription';
     } else {
@@ -207,14 +218,37 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
     }
 
     // Persist, in order: commit, push, state and transcript, then report.
-    let publishedBranch: string | undefined; let headSha: string;
+    // publishNote says, in words for the people on the issue, why nothing new reached GitHub. It stays undefined when work was published.
+    let publishedBranch: string | undefined; let headSha: string; let publishNote: string | undefined;
+    const ahead = (ref: string) => g.commitsAhead(work, base, ref).catch(() => 0);
     if (modeInfo.mode === 'factory') {
+      if (!(await g.localBranchExists(work, branch))) {
+        // The agent may have followed a naming rule in the repository instead of the harness's key. Adopt its branch when there is exactly one with work on it.
+        const others = (await g.localBranches(work, 'factory/')).filter((b) => b !== branch);
+        const withWork: string[] = [];
+        for (const b of others) { const wt = await g.worktreeFor(work, b); if (wt) await g.commitAll(wt, `factory: work on issue #${job.issueNumber} (segment ${job.segmentSeq})`); if (await ahead(`refs/heads/${b}`) > 0) withWork.push(b); }
+        if (withWork.length === 1) {
+          log('factory branch has a different name, publishing it', { expected: branch, found: withWork[0] });
+          branch = withWork[0];
+        } else if (others.length > 0) {
+          publishNote = `The factory did not create branch \`${branch}\`, which is the branch I publish. I found ${others.map((b) => `\`${b}\``).join(', ')} instead, and ${withWork.length === 0 ? 'none of them had commits' : 'could not tell which one to use'}, so nothing was pushed.`;
+        } else {
+          publishNote = `The factory never created branch \`${branch}\` (or any \`factory/\` branch), so there was nothing to push.`;
+        }
+      }
       const wt = await g.worktreeFor(work, branch);
       if (wt) await g.commitAll(wt, `factory: work on issue #${job.issueNumber} (segment ${job.segmentSeq})`);
       if (await g.localBranchExists(work, branch)) {
         try { await g.publish(work, branch, remoteUrl, await freshToken(), `refs/heads/${branch}`); }
         catch (e) { throw new Coded('PUSH_FAILED', (e as Error).message); }
         publishedBranch = branch; headSha = await g.refSha(work, `refs/heads/${branch}`);
+        if (await ahead(`refs/heads/${branch}`) === 0) publishNote = `Branch \`${branch}\` has no commits beyond \`${base}\`.`;
+      } else if (fallbackBranch && await g.commitMainCheckout(work, fallbackBranch, `agent: work on issue #${job.issueNumber} (segment ${job.segmentSeq})`) && await ahead('HEAD') > 0) {
+        // No factory branch, but the agent changed the main checkout: the documented fallback when the factory cannot run. Publish it on the agent branch.
+        log('factory branch missing, publishing main-checkout changes', { branch: fallbackBranch });
+        try { await g.publish(work, fallbackBranch, remoteUrl, await freshToken()); }
+        catch (e) { throw new Coded('PUSH_FAILED', (e as Error).message); }
+        publishedBranch = fallbackBranch; publishNote = undefined; headSha = await g.headSha(work);
       } else {
         headSha = await g.refSha(work, 'HEAD'); // the factory has not created its branch yet, so there is nothing to publish
       }
@@ -225,14 +259,16 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
       try { await g.publish(work, branch, remoteUrl, await freshToken()); }
       catch (e) { throw new Coded('PUSH_FAILED', (e as Error).message); }
       headSha = await g.headSha(work);
+      if (await ahead('HEAD') === 0) publishNote = `No files in the repository changed, so branch \`${branch}\` has nothing beyond \`${base}\`.`;
     }
+    if (publishNote) log('nothing new published', { publishNote });
     if (transcript) await d.saveTranscript(job.transcriptKey, transcript);
     if (backend === 'claude-code' && d.saveClaudeSession) {
       const session = await packDir(configDir);
       if (session) await d.saveClaudeSession(job, session);
     }
     await d.reportSuccess(job.callbackId, {
-      ...outcome, tokensUsed, headSha, usage, billing, ...(cost !== undefined ? { costUsd: cost } : {}), ...(publishedBranch ? { branch: publishedBranch } : {}),
+      ...outcome, tokensUsed, headSha, usage, billing, ...(cost !== undefined ? { costUsd: cost } : {}), ...(publishedBranch ? { branch: publishedBranch } : {}), ...(publishNote ? { publishNote } : {}),
     });
   } catch (e) {
     const code = e instanceof Coded ? e.code : (e as { code?: unknown }).code === 'BACKEND_NOT_CONFIGURED' ? 'BACKEND_NOT_CONFIGURED' : 'SEGMENT_ERROR';
@@ -246,6 +282,7 @@ export async function runSegment(d: HarnessDeps, job: SegmentJob): Promise<void>
 
 /** The factory's branch for this issue: factory/gh-<n> for the first pull request, factory/gh-<n>-<k> for the k-th. */
 export function factoryBranch(job: Pick<SegmentJob, 'issueNumber' | 'branch'>): string {
+  if (job.branch.startsWith('factory/')) return job.branch; // an earlier segment published the factory's branch under its own name
   const k = new RegExp(`^agent/issue-${job.issueNumber}-(\\d+)$`).exec(job.branch)?.[1];
   return `factory/gh-${job.issueNumber}${k ? `-${k}` : ''}`;
 }

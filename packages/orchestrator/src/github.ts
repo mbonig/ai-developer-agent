@@ -70,7 +70,7 @@ export function createGithubApi(getToken: TokenFn, fetchImpl: typeof fetch = fet
         return found.number as number;
       }
       const info = await call(token, 'GET', `/repos/${owner}/${repo}`);
-      const ahead = await call(token, 'GET', `/repos/${owner}/${repo}/compare/${encodeURIComponent(info.default_branch)}...${encodeURIComponent(head)}`).then((c) => c.ahead_by as number, () => 0); // missing branch counts as nothing to propose
+      const ahead = await call(token, 'GET', `/repos/${owner}/${repo}/compare/${encodeURIComponent(info.default_branch)}...${encodeURIComponent(head)}`).then((c) => c.ahead_by as number, (e: Error) => { if (/failed: 404$/.test(e.message)) return 0; throw e; }); // a missing branch counts as nothing to propose; other errors are retried
       if (ahead === 0) return undefined;
       const pr = await call(token, 'POST', `/repos/${owner}/${repo}/pulls`, { title, body, head, base: info.default_branch, draft });
       return pr.number as number;

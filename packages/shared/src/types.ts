@@ -84,6 +84,8 @@ export type SegmentResult = SegmentOutcome & {
   billing?: 'bedrock' | 'subscription';
   /** The branch the segment published, when it differs from the issue's default agent branch (factory mode). */
   branch?: string;
+  /** Set when the segment pushed nothing new: why, in words for the people on the issue. */
+  publishNote?: string;
 };
 
 export const issueKey = (owner: string, repo: string, n: number) => `ISSUE#${owner}/${repo}#${n}`;

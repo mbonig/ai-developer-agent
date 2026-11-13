@@ -75,6 +75,24 @@ export async function commitAll(dir: string, message: string): Promise<boolean> 
 }
 
 /**
+ * Commits main-checkout changes onto `branch` (created from HEAD if needed), leaving out factory/: `swamp extension pull` rewrites tracked files there.
+ * Returns true when HEAD is on `branch` afterwards, whether or not there was anything new to commit.
+ */
+export async function commitMainCheckout(dir: string, branch: string, message: string): Promise<boolean> {
+  const o = { cwd: dir, asAgent: true };
+  const NOHOOKS = ['-c', 'core.hooksPath=/dev/null'];
+  await git([...NOHOOKS, 'add', '-A', '--', '.', ':(exclude)factory'], o);
+  const staged = (await git([...NOHOOKS, 'diff', '--cached', '--name-only'], o)).trim() !== '';
+  const current = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], o)).trim();
+  if (current !== branch) {
+    if (!staged) return false; // nothing to carry over, and HEAD is still the default branch
+    await git(['checkout', '--quiet', '-B', branch], o);
+  }
+  if (staged) await git([...NOHOOKS, ...IDENT, 'commit', '--quiet', '--no-verify', '-m', message], o);
+  return true;
+}
+
+/**
  * Publishes HEAD of the agent's repository to `remoteUrl`.
  * The agent can edit its repo's config and hooks (URL rewrites, hooks, credential helpers), so the token is never used
  * there. Commits are fetched into a fresh repository that only the harness has touched, and pushed from that one.
@@ -109,6 +127,17 @@ export async function fetchBranchLocal(dir: string, branch: string, token?: stri
 
 export async function localBranchExists(dir: string, branch: string): Promise<boolean> {
   try { await git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: dir, asAgent: true }); return true; } catch { return false; }
+}
+
+/** Local branch names under `prefix` (for example `factory/`). */
+export async function localBranches(dir: string, prefix: string): Promise<string[]> {
+  const out = await git(['for-each-ref', '--format=%(refname:short)', `refs/heads/${prefix}`], { cwd: dir, asAgent: true });
+  return out.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
+/** How many commits `ref` has that `origin/<base>` does not. */
+export async function commitsAhead(dir: string, base: string, ref: string): Promise<number> {
+  return Number((await git(['rev-list', '--count', `origin/${base}..${ref}`], { cwd: dir, asAgent: true })).trim());
 }
 
 export async function refSha(dir: string, ref: string): Promise<string> {
