@@ -32,7 +32,22 @@ const parseKey = (k: string) => {
   return { owner: m[1], repo: m[2], number: Number(m[3]) };
 };
 
-const parsePayload = <T>(x: unknown): T => (typeof x === 'string' ? JSON.parse(x) : x) as T;
+/** GitHub comments are capped at 65536 characters; leave room for the rest of the message. */
+const MAX_QUOTED = 60000;
+
+/** Explains a finish that left nothing to propose: what the harness found, and what the agent said when it finished. */
+export function noChangeComment(head: string, publishNote: string | undefined, pr: { title: string; body: string }): string {
+  const said = [pr.title.trim() && `**${pr.title.trim()}**`, pr.body.trim()].filter(Boolean).join('\n\n');
+  const quoted = said.length > MAX_QUOTED ? `${said.slice(0, MAX_QUOTED)}\n\n(cut short)` : said;
+  return [
+    'I finished, but there are no changes to propose, so I did not open a pull request.',
+    `**Why there is nothing to propose:** ${publishNote ?? `branch \`${head}\` has no commits beyond the default branch.`}`,
+    quoted ? `**What I said when I finished:**\n\n${quoted.split('\n').map((l) => `> ${l}`).join('\n')}` : '**What I said when I finished:** nothing (I gave no summary).',
+    'If you expected changes, reply with what you expected and I will pick it up again.',
+  ].join('\n\n');
+}
+
+const parsePayload =<T>(x: unknown): T => (typeof x === 'string' ? JSON.parse(x) : x) as T;
 
 export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: OrchDeps): Promise<{ status: string }> {
   const { store, config: c } = d;
@@ -203,7 +218,8 @@ export async function orchestrate(ctx: Ctx, input: { issueKey: string }, d: Orch
         const prNumber = await ctx.step(`open-pr-${iter}`, () =>
           d.github.openPr({ installationId: meta.installationId, owner, repo, head, title: r.pr.title, body, draft: c.prDraft }));
         if (prNumber === undefined) { // nothing was changed, so there is nothing to propose
-          await comment(`nochange-comment-${iter}`, meta, issueNumber, 'I finished without making any changes, so there is no pull request to open. Reply if you expected changes.', `${segmentSeq}:nochange`);
+          d.log?.('finished without changes', { issueKey: key, segmentSeq, head, publishNote: r.publishNote });
+          await comment(`nochange-comment-${iter}`, meta, issueNumber, noChangeComment(head, r.publishNote, r.pr), `${segmentSeq}:nochange`);
           break;
         }
         await ctx.step(`link-pr-${iter}`, async () => { await linkPr(store, key, owner, repo, prNumber); await setPhase(store, key, 'REVIEW'); });

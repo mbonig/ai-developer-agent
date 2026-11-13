@@ -202,7 +202,31 @@ test('factory mode with no factory branch yet publishes nothing and reports no b
   await runSegment(h.d, job());
   assert.equal(h.ok[0].type, 'questions'); assert.equal(h.ok[0].branch, undefined);
   assert.equal(execFileSync('git', ['--git-dir', bare, 'branch', '--list', 'factory/*'], { encoding: 'utf8' }).trim(), '');
+  assert.match(h.ok[0].publishNote ?? '', /never created branch `factory\/gh-7`/);
   void root;
+});
+
+test('factory mode: a factory branch with a different name (the repo\'s own key rule) is published instead of lost', async () => {
+  const { bare } = remoteWith(FACTORY_FILES);
+  const wt = join(mkdtempSync(join(tmpdir(), 'fwt-')), 'eh-issue-7');
+  const h = deps(bare, [
+    () => reply([use('1', 'run_command', { command: `git worktree add -q -b factory/eh-issue-7 ${wt} origin/main && echo built > ${wt}/feature.txt` })]),
+    () => reply([use('2', 'finish', { title: 'Add feature', body: 'Closes #7' })]),
+  ], { enableFactory: true });
+  await runSegment(h.d, job());
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  assert.equal(h.ok[0].type, 'done'); assert.equal(h.ok[0].branch, 'factory/eh-issue-7'); assert.equal(h.ok[0].publishNote, undefined);
+  assert.match(execFileSync('git', ['--git-dir', bare, 'log', '-1', '--format=%s', 'factory/eh-issue-7'], { encoding: 'utf8' }), /factory: work on issue #7/);
+  // Later segments keep using it.
+  assert.equal(factoryBranch({ issueNumber: 7, branch: 'factory/eh-issue-7' }), 'factory/eh-issue-7');
+});
+
+test('plain mode: finishing without touching any file reports why nothing was published', async () => {
+  const { bare } = remote();
+  const h = deps(bare, [() => reply([use('1', 'finish', { title: 'No change needed', body: 'hello.txt already exists' })])]);
+  await runSegment(h.d, job());
+  assert.equal(h.ok[0].type, 'done');
+  assert.match(h.ok[0].publishNote ?? '', /No files in the repository changed, so branch `agent\/issue-7` has nothing beyond `main`/);
 });
 
 test('a repository with a factory is treated as OpenSpec/plain unless the factory is enabled', async () => {
@@ -382,4 +406,25 @@ test('the factory branch follows the pull request number: factory/gh-<n>, then f
   assert.equal(factoryBranch({ issueNumber: 70, branch: 'factory/gh-70' }), 'factory/gh-70');
   assert.equal(factoryBranch({ issueNumber: 70, branch: 'agent/issue-70-2' }), 'factory/gh-70-2');
   assert.equal(factoryBranch({ issueNumber: 7, branch: 'agent/issue-70-2' }), 'factory/gh-7');
+});
+
+test('claude code, factory mode: main-checkout edits (the fallback when swamp cannot run) are published on the agent branch, not dropped', async () => {
+  const { bare } = remoteWith(FACTORY_FILES); const fc = fakeClaude('finish');
+  const h = ccDeps(bare, fc, { enableFactory: true });
+  await runSegment(h.d, job());
+  assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  assert.equal(h.ok[0].type, 'done'); assert.equal(h.ok[0].branch, 'agent/issue-7'); assert.equal(h.ok[0].publishNote, undefined);
+  assert.equal(execFileSync('git', ['--git-dir', bare, 'show', 'agent/issue-7:feature.txt'], { encoding: 'utf8' }), 'built by the fake\n');
+});
+
+test('claude code, factory mode: swamp gets its key through the wrapper even when the agent environment drops SWAMP_API_KEY_FILE', async () => {
+  const { bare } = remoteWith(FACTORY_FILES); const fc = fakeClaude('swamp');
+  const realDir = mkdtempSync(join(tmpdir(), 'swamp-')); writeFileSync(join(realDir, 'swamp'), '#!/bin/sh\necho "key=$(cat "$SWAMP_API_KEY_FILE")"\n'); chmodSync(join(realDir, 'swamp'), 0o755);
+  const path = process.env.PATH; process.env.PATH = `${realDir}:${path}`;
+  try {
+    const h = ccDeps(bare, fc, { enableFactory: true, getSwampKey: async () => 'swamp-token-9' });
+    await runSegment(h.d, job());
+    assert.equal(h.bad.length, 0, JSON.stringify(h.bad));
+  } finally { process.env.PATH = path; }
+  assert.equal(execFileSync('git', ['--git-dir', bare, 'show', 'agent/issue-7:swamp-out.txt'], { encoding: 'utf8' }), 'key=swamp-token-9\n');
 });

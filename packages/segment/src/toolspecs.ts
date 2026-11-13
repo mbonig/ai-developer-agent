@@ -45,7 +45,7 @@ export const subagentToolSpecs = (): ToolSpec[] =>
 
 export function toolSpecs(phase: Phase, mode: WorkMode = 'plain'): ToolSpec[] {
   const finish: ToolSpec = phase === 'IMPLEMENT'
-    ? { name: 'finish', description: 'Call when the implementation is complete. The harness will open a pull request with this title and body.',
+    ? { name: 'finish', description: 'Call when the implementation is complete. The harness will open a pull request with this title and body. If you decide no change is needed, still call it, and make the body explain why (for example, what already does what the issue asks, with file paths): it is posted on the issue.',
         schema: obj({ title: s('Pull request title'), body: s('Pull request description in markdown') }, ['title', 'body']) }
     : { name: 'finish', description: 'Call when you have addressed the review feedback. The summary is posted on the pull request.',
         schema: obj({ summary: s('Summary of what you changed, in markdown') }, ['summary']) };

@@ -5,7 +5,7 @@ import { DynamoDBClient, CreateTableCommand } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { CallbackTimeoutError } from '@aws/durable-execution-sdk-js';
 import { createMeta, getMeta, appendMessage, wake, requestCancel, unlinkPr, issueKey, loadConfig, type Store, type SegmentJob } from '@agent/shared';
-import { orchestrate, type Ctx, type OrchDeps } from '../src/orchestrate.ts';
+import { orchestrate, noChangeComment, type Ctx, type OrchDeps } from '../src/orchestrate.ts';
 import { createGithubApi, markerComment, replaceSection, type GithubApi } from '../src/github.ts';
 import { renderCostSection } from '../src/cost.ts';
 
@@ -211,10 +211,21 @@ test('budget exhausted with pushed work opens a draft PR; with no commits it doe
 test('finishing without changes posts a note instead of failing, and keeps waiting', async () => {
   const { key } = await fresh();
   const { ctx, deps, log } = harness(
-    [() => ({ type: 'done', pr: { title: 'T', body: 'B' }, tokensUsed: 1, headSha: 'a' })],
+    [() => ({ type: 'done', pr: { title: 'Nothing to do', body: 'The distance already updates live in client/lib/parts.dart.' }, tokensUsed: 1, headSha: 'a',
+      publishNote: 'The factory never created branch `factory/gh-7`.' })],
     [async () => { await requestCancel(store, key, 'issue closed'); return { cancel: true }; }], { noCommits: true });
   assert.equal((await orchestrate(ctx, { issueKey: key }, deps)).status, 'DONE');
-  assert.ok(log.comments.some((c) => c.includes('without making any changes')));
+  const c = log.comments.find((x) => x.includes('no changes to propose'));
+  assert.ok(c, JSON.stringify(log.comments));
+  assert.match(c, /never created branch `factory\/gh-7`/);                       // what the harness found
+  assert.match(c, /> \*\*Nothing to do\*\*\n> \n> The distance already updates live/); // what the agent said, quoted
+});
+
+test('the no-change comment falls back to the branch when the harness gave no reason, and says when the agent gave no summary', () => {
+  const c = noChangeComment('agent/issue-7', undefined, { title: ' ', body: '' });
+  assert.match(c, /branch `agent\/issue-7` has no commits beyond the default branch/);
+  assert.match(c, /nothing \(I gave no summary\)/);
+  assert.ok(noChangeComment('b', 'x', { title: 't', body: 'y'.repeat(70000) }).length < 65000);
 });
 
 test('cancel flagged while a segment runs stops before posting', async () => {
@@ -225,14 +236,14 @@ test('cancel flagged while a segment runs stops before posting', async () => {
 });
 
 test('github client is idempotent: comment marker and PR by head branch', async () => {
-  let aheadBy = 2; const calls: string[] = []; const comments: Array<{ body: string }> = []; const prs: Array<{ number: number }> = [];
+  let aheadBy = 2; let compareStatus = 200; const calls: string[] = []; const comments: Array<{ body: string }> = []; const prs: Array<{ number: number }> = [];
   const fakeFetch = (async (url: string, init: RequestInit) => {
     const path = url.replace('https://api.github.com', ''); const method = init.method!; calls.push(`${method} ${path.split('?')[0]}`);
     const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s });
     if (method === 'GET' && path.includes('/comments')) return j(comments);
     if (method === 'POST' && path.includes('/comments')) { comments.push(JSON.parse(init.body as string)); return j({}, 201); }
     if (method === 'GET' && path.includes('/pulls')) return j(prs);
-    if (method === 'GET' && path.includes('/compare/')) return j({ ahead_by: aheadBy });
+    if (method === 'GET' && path.includes('/compare/')) return compareStatus === 200 ? j({ ahead_by: aheadBy }) : j({}, compareStatus);
     if (method === 'GET') return j({ default_branch: 'main' });
     if (method === 'POST' && path.includes('/pulls')) { prs.push({ number: 9 }); return j({ number: 9 }, 201); }
     return j({}, 404);
@@ -248,6 +259,8 @@ test('github client is idempotent: comment marker and PR by head branch', async 
   prs.length = 0; aheadBy = 0; // a branch with no commits has nothing to propose
   assert.equal(await gh.openPr(pr), undefined);
   assert.equal(calls.filter((c) => c === 'POST /repos/o/r/pulls').length, 1);
+  compareStatus = 404; assert.equal(await gh.openPr(pr), undefined);                // a branch that was never pushed has nothing to propose
+  compareStatus = 502; await assert.rejects(gh.openPr(pr), /502/);                 // a GitHub error is not mistaken for "no changes"
 });
 
 test('a segment that published a different branch (factory mode) opens the PR from it and records it', async () => {
